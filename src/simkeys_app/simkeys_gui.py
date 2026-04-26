@@ -966,13 +966,10 @@ class SimKeysDesktopApp:
         self.damage_meter_calculate_button = None
         self.log_text = None
         self.sections_scroller = None
-        self.script_scroller = None
-        self.analysis_paned = None
+        self.script_container = None
         self.target_analysis_frame = None
         self.damage_meter_frame = None
-        self.target_analysis_last_height = 300
         self.activity_log_frame = None
-        self.activity_log_last_height = 260
 
         self._configure_style()
         self._build_ui()
@@ -1007,7 +1004,7 @@ class SimKeysDesktopApp:
         if not os.path.isfile(path):
             return
         try:
-            with open(path, "r", encoding="utf-8") as handle:
+            with open(path, "r", encoding="utf-8-sig") as handle:
                 payload = json.load(handle)
         except Exception as exc:
             self.log(f"Character defaults load failed: {exc}", "error")
@@ -1244,7 +1241,6 @@ class SimKeysDesktopApp:
 
         self.sections_scroller = ScrollableFrame(paned, stretch_height=True)
         self.sections_scroller.interior.columnconfigure(0, weight=1)
-        self.sections_scroller.interior.rowconfigure(3, weight=1)
         right = self.sections_scroller.interior
         paned.add(self.sections_scroller, weight=5)
         self.root.after(250, self._set_initial_pane_sizes)
@@ -1359,12 +1355,13 @@ class SimKeysDesktopApp:
         self._set_damage_meter_text("Press Calculate to summarize this HGCC GUI session.")
         self._apply_damage_meter_state()
 
-        analysis_paned = ttk.Panedwindow(right, orient="vertical")
-        analysis_paned.grid(row=3, column=0, sticky="nsew")
-        self.analysis_paned = analysis_paned
+        analysis_stack = ttk.Frame(right)
+        analysis_stack.grid(row=3, column=0, sticky="ew")
+        analysis_stack.columnconfigure(0, weight=1)
 
-        target = ttk.LabelFrame(analysis_paned, text="Target Analysis", padding=10)
+        target = ttk.LabelFrame(analysis_stack, text="Target Analysis", padding=10)
         self.target_analysis_frame = target
+        target.grid(row=0, column=0, sticky="ew", pady=(0, 10))
         target.columnconfigure(0, weight=1)
         target.rowconfigure(1, weight=1)
         target_header = ttk.Frame(target)
@@ -1384,23 +1381,22 @@ class SimKeysDesktopApp:
         self.target_analysis_text.grid(row=1, column=0, sticky="nsew")
         self.target_analysis_text.configure(state="disabled")
         self._set_target_analysis_text("Start Auto Damage in Weapon Swap mode to see target resistances and weapon estimates.")
-        analysis_paned.add(target, weight=2)
 
-        scripts = ttk.LabelFrame(analysis_paned, text="Automation", padding=10)
+        scripts = ttk.LabelFrame(analysis_stack, text="Automation", padding=10)
+        scripts.grid(row=1, column=0, sticky="ew", pady=(0, 10))
         scripts.columnconfigure(0, weight=1)
-        scripts.rowconfigure(0, weight=1)
-        self.script_scroller = ScrollableFrame(scripts)
-        self.script_scroller.grid(row=0, column=0, sticky="nsew")
-        self.script_scroller.interior.columnconfigure(0, weight=1)
+        self.script_container = ttk.Frame(scripts)
+        self.script_container.grid(row=0, column=0, sticky="ew")
+        self.script_container.columnconfigure(0, weight=1)
         self.script_rows = {}
         for row_index, definition in enumerate(self.script_manager.definitions()):
-            row = ScriptCard(self.script_scroller.interior, definition, self)
+            row = ScriptCard(self.script_container, definition, self)
             row.grid(row=row_index, column=0, sticky="ew", pady=(0, 4))
             self.script_rows[definition.script_id] = row
-        analysis_paned.add(scripts, weight=3)
 
-        logs = ttk.LabelFrame(analysis_paned, text="Activity Log", padding=10)
+        logs = ttk.LabelFrame(analysis_stack, text="Activity Log", padding=10)
         self.activity_log_frame = logs
+        logs.grid(row=2, column=0, sticky="ew")
         logs.columnconfigure(0, weight=1)
         logs.rowconfigure(1, weight=1)
         logs_header = ttk.Frame(logs)
@@ -1419,7 +1415,6 @@ class SimKeysDesktopApp:
         self.log_text = ScrolledText(logs, wrap="word", height=18, font=("Consolas", 10))
         self.log_text.grid(row=1, column=0, sticky="nsew")
         self.log_text.configure(state="disabled")
-        analysis_paned.add(logs, weight=2)
         self._apply_target_analysis_state()
         self._apply_activity_log_state()
 
@@ -1554,8 +1549,6 @@ class SimKeysDesktopApp:
         self.run_background(f"Post Damage Meter {report_type}", action)
 
     def toggle_target_analysis(self):
-        if self.target_analysis_expanded:
-            self._remember_target_analysis_height()
         self.target_analysis_expanded = not self.target_analysis_expanded
         self._apply_target_analysis_state()
 
@@ -1565,16 +1558,12 @@ class SimKeysDesktopApp:
         if self.target_analysis_expanded:
             self.target_analysis_text.grid()
             self.target_analysis_toggle_var.set("Hide Target Analysis")
-            self.root.after_idle(self._restore_target_analysis_height)
         else:
             self.target_analysis_text.grid_remove()
             self.target_analysis_toggle_var.set("Show Target Analysis")
-            self.root.after_idle(self._shrink_target_analysis_height)
         self.refresh_scroll_regions()
 
     def toggle_activity_log(self):
-        if self.activity_log_expanded:
-            self._remember_activity_log_height()
         self.activity_log_expanded = not self.activity_log_expanded
         self._apply_activity_log_state()
 
@@ -1584,11 +1573,9 @@ class SimKeysDesktopApp:
         if self.activity_log_expanded:
             self.log_text.grid()
             self.activity_log_toggle_var.set("Hide Activity Log")
-            self.root.after_idle(self._restore_activity_log_height)
         else:
             self.log_text.grid_remove()
             self.activity_log_toggle_var.set("Show Activity Log")
-            self.root.after_idle(self._shrink_activity_log_height)
         self.refresh_scroll_regions()
 
     def refresh_scroll_regions(self):
@@ -1598,7 +1585,7 @@ class SimKeysDesktopApp:
             pass
 
     def _refresh_scroll_regions(self):
-        for scroller in (self.script_scroller, self.sections_scroller):
+        for scroller in (self.sections_scroller,):
             if scroller is None:
                 continue
             try:
@@ -1606,104 +1593,13 @@ class SimKeysDesktopApp:
             except tk.TclError:
                 pass
 
-    def _remember_target_analysis_height(self):
-        if self.analysis_paned is None:
-            return
-        try:
-            height = int(self.analysis_paned.sashpos(0))
-        except tk.TclError:
-            return
-        if height > 90:
-            self.target_analysis_last_height = height
-
-    def _target_analysis_collapsed_height(self) -> int:
-        if self.target_analysis_frame is None:
-            return 48
-        try:
-            return max(44, int(self.target_analysis_frame.winfo_reqheight()))
-        except tk.TclError:
-            return 48
-
-    def _remember_activity_log_height(self):
-        if self.analysis_paned is None:
-            return
-        try:
-            total_height = int(self.analysis_paned.winfo_height())
-            sash = int(self.analysis_paned.sashpos(1))
-        except tk.TclError:
-            return
-        height = total_height - sash
-        if height > 90:
-            self.activity_log_last_height = height
-
-    def _shrink_target_analysis_height(self):
-        if self.analysis_paned is None:
-            return
-        try:
-            self.analysis_paned.sashpos(0, self._target_analysis_collapsed_height())
-        except tk.TclError:
-            pass
-
-    def _activity_log_collapsed_height(self):
-        if self.activity_log_frame is None:
-            return 48
-        try:
-            return max(44, int(self.activity_log_frame.winfo_reqheight()))
-        except tk.TclError:
-            return 48
-
-    def _shrink_activity_log_height(self):
-        if self.analysis_paned is None:
-            return
-        try:
-            total_height = max(int(self.analysis_paned.winfo_height()), 1)
-            self.analysis_paned.sashpos(1, max(0, total_height - self._activity_log_collapsed_height()))
-        except tk.TclError:
-            pass
-
-    def _restore_target_analysis_height(self):
-        if self.analysis_paned is None:
-            return
-        try:
-            total_height = max(int(self.analysis_paned.winfo_height()), 1)
-            target_height = max(220, min(int(self.target_analysis_last_height), max(total_height - 260, 120)))
-            self.analysis_paned.sashpos(0, target_height)
-        except tk.TclError:
-            pass
-
-    def _restore_activity_log_height(self):
-        if self.analysis_paned is None:
-            return
-        try:
-            total_height = max(int(self.analysis_paned.winfo_height()), 1)
-            log_height = max(140, min(int(self.activity_log_last_height), max(total_height - 260, 100)))
-            self.analysis_paned.sashpos(1, max(0, total_height - log_height))
-        except tk.TclError:
-            pass
-
     def _set_initial_pane_sizes(self):
         try:
             if self.main_paned.winfo_width() > 0:
                 self.main_paned.sashpos(0, 430)
         except tk.TclError:
             pass
-        try:
-            if self.analysis_paned is not None and self.analysis_paned.winfo_height() > 0:
-                height = self.analysis_paned.winfo_height()
-                if self.target_analysis_expanded:
-                    target_height = max(240, min(380, height // 3))
-                else:
-                    target_height = self._target_analysis_collapsed_height()
-                self.analysis_paned.sashpos(0, target_height)
-                remaining_height = max(height - target_height, 160)
-                if self.activity_log_expanded:
-                    log_height = max(140, min(int(self.activity_log_last_height), max(remaining_height // 3, 100)))
-                else:
-                    log_height = self._activity_log_collapsed_height()
-                log_sash = max(target_height + 120, height - log_height)
-                self.analysis_paned.sashpos(1, log_sash)
-        except tk.TclError:
-            pass
+        self.refresh_scroll_regions()
 
     def _on_details_resize(self, event):
         self.details_label.configure(wraplength=max(int(event.width) - 24, 240))

@@ -148,6 +148,34 @@ class GuiSavedScriptsTests(unittest.TestCase):
             self.assertTrue(reloaded.get_script_autostart(202, "auto_attack"))
             self.assertFalse(reloaded.get_script_autostart(202, "auto_aa"))
 
+    def test_character_defaults_loader_accepts_utf8_bom(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "character_defaults.user.json")
+            with open(path, "w", encoding="utf-8-sig") as handle:
+                handle.write(
+                    """{
+  "version": 3,
+  "characters": {
+    "starcore-bob": {
+      "name": "Starcore-Bob",
+      "scripts": {},
+      "auto_start": {
+        "always_on": true
+      }
+    }
+  }
+}
+"""
+                )
+
+            app = make_persistence_app(path)
+            app._load_character_defaults_store()
+            record = SimpleNamespace(pid=202, character_name="Starcore-Bob", display_name="Starcore-Bob")
+
+            self.assertTrue(app._auto_load_character_defaults(record))
+            self.assertTrue(app.get_script_autostart(202, "always_on"))
+            self.assertFalse([message for level, message in app.log_messages if level == "error"])
+
     def test_default_scripts_autostart_can_be_disabled_per_character(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             path = os.path.join(tmpdir, "character_defaults.user.json")
