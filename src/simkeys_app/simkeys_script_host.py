@@ -265,6 +265,10 @@ SHIFTER_ESSENCE_LINE_RE = re.compile(
     r"^You have (?P<current>\d+)\s*/\s*(?P<maximum>\d+) essence points remaining\.\s*$",
     re.IGNORECASE,
 )
+SHIFTER_ALREADY_POLYMORPHED_RE = re.compile(
+    r"^You cannot change shape while already polymorphed!?\s*$",
+    re.IGNORECASE,
+)
 PLAYER_HIDE_LINE_RE = re.compile(r"^Acquired Item:\s*Player Hide\s*$", re.IGNORECASE)
 SPELL_EFFECT_ALIASES = {
     "storm of vengeance": "Divine Power",
@@ -411,6 +415,7 @@ class ChatLineEvent:
     shifter_shift_actor: str = ""
     shifter_essence_current: int = 0
     shifter_essence_maximum: int = 0
+    shifter_already_polymorphed: bool = False
     player_hide: bool = False
     averted_death_player: str = ""
     kill_killer: str = ""
@@ -442,6 +447,7 @@ def parse_chat_line_event(sequence: int, text: str, password_prompt_text: str = 
     shifter_shift_actor = ""
     shifter_essence_current = 0
     shifter_essence_maximum = 0
+    shifter_already_polymorphed = False
     player_hide = False
     averted_death_player = ""
     kill_killer = ""
@@ -522,6 +528,10 @@ def parse_chat_line_event(sequence: int, text: str, password_prompt_text: str = 
         shifter_essence_maximum = int(shifter_essence.group("maximum") or "0")
         kinds.add("shifter_state")
 
+    if SHIFTER_ALREADY_POLYMORPHED_RE.match(normalized):
+        shifter_already_polymorphed = True
+        kinds.add("shifter_state")
+
     shifter_shift = SHIFTER_SHIFT_LINE_RE.match(normalized)
     if shifter_shift is not None:
         shifter_shift_actor = hgx_combat.normalize_actor_name(shifter_shift.group("actor"))
@@ -565,6 +575,7 @@ def parse_chat_line_event(sequence: int, text: str, password_prompt_text: str = 
         shifter_shift_actor=shifter_shift_actor,
         shifter_essence_current=shifter_essence_current,
         shifter_essence_maximum=shifter_essence_maximum,
+        shifter_already_polymorphed=shifter_already_polymorphed,
         player_hide=player_hide,
         averted_death_player=averted_death_player,
         kill_killer=kill_killer,
@@ -1073,6 +1084,10 @@ class AutoDrinkScript(ClientScriptBase):
     def _poll_health_once(self):
         if not self.enabled or self.drinking:
             return
+        if self.host.is_shifter_recovery_active():
+            self.lock_saved_for_recovery = False
+            self.set_status("Paused: shifter form recovery")
+            return
 
         current_hp, max_hp, percent, source = self._read_health_snapshot()
         threshold_percent = float(self.config.get("threshold_percent", 80.0))
@@ -1471,6 +1486,9 @@ class AutoAAScript(ClientScriptBase):
     SHIFTER_WEAPON_CONFIRM_RETRY_SECONDS = 2.00
     SHIFTER_SHIFT_FIRST_RETRY_SECONDS = 2.00
     SHIFTER_SHIFT_RETRY_SECONDS = 1.00
+    SHIFTER_COMBAT_ACTIVITY_SECONDS = 5.00
+    SHIFTER_SHIFT_RECOVERY_TTL_SECONDS = 4.00
+    SHIFTER_EQUIPPED_MASK_GRACE_SECONDS = 3.00
     SLINGER_PENDING_SECONDS = 9.0
     SLINGER_STATE_TTL_SECONDS = 45.0
     SMALL_FETCH_TARGETS = {
@@ -1552,6 +1570,8 @@ class AutoAAScript(ClientScriptBase):
         self.shifter_last_essence_line = ""
         self.shifter_last_player_hide_at = 0.0
         self.shifter_last_shift_at = 0.0
+        self.shifter_last_combat_at = 0.0
+        self.shifter_last_mask_form_check_at = 0.0
         self.shifter_resume_pending = False
         self.shifter_lock_sent = False
         self.shifter_last_error = ""
@@ -1667,6 +1687,7 @@ class AutoAAScript(ClientScriptBase):
         self.weapon_pending_attack_results = []
         self._reset_shifter_runtime(clear_observed=True)
         self.canister_stop.set()
+        self.host.set_shifter_recovery_active(False)
         self.host.emit("info", f"{self.host.client.display_name}: {self._mode_label()} stopped", script_id=self.script_id)
 
     def on_tick(self):
@@ -1698,6 +1719,8 @@ class AutoAAScript(ClientScriptBase):
         if not self.should_process(sequence) or not self.enabled:
             return
         self.current_chat_sequence = sequence
+        if self._is_shifter_weapon_mode() and (event.attack is not None or event.damage is not None):
+            self.shifter_last_combat_at = time.monotonic()
 
         if self._is_weapon_mode():
             if self._is_shifter_weapon_mode():
@@ -1872,6 +1895,8 @@ class AutoAAScript(ClientScriptBase):
             self.shifter_last_essence_line = ""
             self.shifter_last_player_hide_at = 0.0
             self.shifter_last_shift_at = 0.0
+            self.shifter_last_combat_at = 0.0
+            self.shifter_last_mask_form_check_at = 0.0
 
     def _mode_label(self) -> str:
         mode = str(self.config.get("mode", self.MODE_ARCANE_ARCHER)).strip()
@@ -1891,6 +1916,85 @@ class AutoAAScript(ClientScriptBase):
 
     def _is_shifter_weapon_mode(self) -> bool:
         return self._mode_label() == self.MODE_SHIFTER_WEAPON_SWAP
+
+    def _recent_shifter_combat(self, now: Optional[float] = None) -> bool:
+        if now is None:
+            now = time.monotonic()
+        return (
+            self.shifter_last_combat_at > 0.0
+            and now - self.shifter_last_combat_at <= self.SHIFTER_COMBAT_ACTIVITY_SECONDS
+        )
+
+    def _set_shifter_recovery_active(self, active: bool, reason: str = ""):
+        self.host.set_shifter_recovery_active(
+            active,
+            reason or self.shifter_pending_reason or self.shifter_swap_stage or self._mode_label(),
+            ttl_seconds=self.SHIFTER_SHIFT_RECOVERY_TTL_SECONDS,
+        )
+
+    def _request_shifter_form_recovery(self, reason: str, resume_attack: bool = True) -> bool:
+        if not self._is_shifter_weapon_mode():
+            return False
+        if self.shifter_shift_state == "shifted":
+            self._set_shifter_recovery_active(False)
+            return False
+
+        reason_text = str(reason or "combat form recovery").strip() or "combat form recovery"
+        if self.shifter_swap_stage in ("unshifting", "weapon_pending"):
+            self._set_shifter_recovery_active(True, reason_text)
+            return True
+
+        if not self.shifter_swap_stage:
+            self.shifter_swap_stage = "reshifting"
+            self.shifter_sequence_started_at = time.monotonic()
+            self.shifter_pending_target = self.current_target or "combat"
+            self.shifter_pending_reason = reason_text
+            self.shifter_pending_unarm = False
+            self.shifter_pending_source_key = ""
+            self.shifter_shift_attempts = 0
+            self.shifter_next_shift_attempt_at = 0.0
+            self.shifter_resume_pending = bool(resume_attack)
+            self.shifter_lock_sent = False
+            self.shifter_last_error = ""
+            if self.shifter_resume_pending:
+                self._shifter_send_lock()
+
+        self._set_shifter_recovery_active(True, reason_text)
+        if self.shifter_swap_stage == "reshifting" and time.monotonic() >= self.shifter_next_shift_attempt_at:
+            return self._trigger_shifter_shift(reason_text)
+        return True
+
+    def _check_shifter_quickbar_form_hint(self, now: float) -> bool:
+        if not self._recent_shifter_combat(now):
+            return False
+        if self.shifter_swap_stage:
+            return False
+        if self.shifter_shift_state != "shifted":
+            return False
+        if self.shifter_last_shift_at and now - self.shifter_last_shift_at < self.SHIFTER_EQUIPPED_MASK_GRACE_SECONDS:
+            return False
+        if self.shifter_last_mask_form_check_at and now - self.shifter_last_mask_form_check_at < self.SHIFTER_EQUIPPED_MASK_GRACE_SECONDS:
+            return False
+
+        self.shifter_last_mask_form_check_at = now
+        matches = self._query_equipped_binding_keys(force=True)
+        if not matches:
+            return False
+
+        display = ", ".join(self._binding_display(key) for key in matches)
+        self._mark_shifter_unshifted(f"equipped quickbar mask ({display})")
+        return True
+
+    def _ensure_shifter_form_during_combat(self, reason: str = "recent combat") -> bool:
+        if not self._is_shifter_weapon_mode():
+            return False
+        now = time.monotonic()
+        if not self._recent_shifter_combat(now):
+            return False
+        self._check_shifter_quickbar_form_hint(now)
+        if self.shifter_shift_state != "shifted":
+            return self._request_shifter_form_recovery(reason)
+        return False
 
     def _weapon_binding_keys(self) -> Tuple[str, ...]:
         if not self._is_weapon_mode():
@@ -1992,6 +2096,8 @@ class AutoAAScript(ClientScriptBase):
                 script_id=self.script_id,
             )
         self.host.notify_state_changed()
+        if self._recent_shifter_combat(now):
+            self._request_shifter_form_recovery(reason)
 
     def _mark_shifter_shifted(self, reason: str):
         now = time.monotonic()
@@ -2007,6 +2113,7 @@ class AutoAAScript(ClientScriptBase):
         if self.shifter_swap_stage == "reshifting":
             self._finish_shifter_sequence("shift confirmed")
         else:
+            self._set_shifter_recovery_active(False)
             self.host.notify_state_changed()
 
     def _observe_shifter_state_line(self, text: str):
@@ -2018,6 +2125,10 @@ class AutoAAScript(ClientScriptBase):
 
         if event.player_hide:
             self._mark_shifter_unshifted("Player Hide")
+            return
+
+        if event.shifter_already_polymorphed:
+            self._mark_shifter_shifted(event.normalized)
             return
 
         if event.shifter_essence_maximum > 0:
@@ -2085,10 +2196,12 @@ class AutoAAScript(ClientScriptBase):
 
     def _begin_shifter_sequence(self, binding: WeaponBinding, target_name: str, reason: str, unarm: bool = False) -> bool:
         if self.shifter_swap_stage:
+            self._set_shifter_recovery_active(True, self.shifter_swap_stage)
             self.set_status(f"{target_name}: shifter busy {self.shifter_swap_stage}")
             self.host.notify_state_changed()
             return True
 
+        self._set_shifter_recovery_active(True, reason)
         self.shifter_pending_source_key = binding.key
         self.shifter_pending_target = str(target_name or "").strip()
         self.shifter_pending_reason = str(reason or "").strip()
@@ -2107,6 +2220,7 @@ class AutoAAScript(ClientScriptBase):
         except Exception as exc:
             self.shifter_last_error = str(exc)
             self._reset_shifter_runtime(clear_observed=False)
+            self._set_shifter_recovery_active(False)
             self.set_status(f"{target_name}: unshift failed")
             self.host.emit(
                 "error",
@@ -2118,6 +2232,7 @@ class AutoAAScript(ClientScriptBase):
         if not result.get("success"):
             self.shifter_last_error = f"rc={result.get('rc')} err={result.get('err')}"
             self._reset_shifter_runtime(clear_observed=False)
+            self._set_shifter_recovery_active(False)
             self.set_status(f"{target_name}: unshift failed")
             self.host.emit(
                 "error",
@@ -2145,6 +2260,7 @@ class AutoAAScript(ClientScriptBase):
         return True
 
     def _trigger_shifter_weapon_slot(self, reason: str, preserve_retry_count: bool = False) -> bool:
+        self._set_shifter_recovery_active(True, reason)
         binding = self.weapon_bindings.get(self.shifter_pending_source_key)
         target_name = self.shifter_pending_target or "target"
         if binding is None:
@@ -2228,12 +2344,14 @@ class AutoAAScript(ClientScriptBase):
         return True
 
     def _begin_shifter_reshift(self, reason: str):
+        self._set_shifter_recovery_active(True, reason)
         self.shifter_swap_stage = "reshifting"
         self.shifter_shift_attempts = 0
         self.shifter_next_shift_attempt_at = 0.0
         self._trigger_shifter_shift(reason)
 
     def _trigger_shifter_shift(self, reason: str) -> bool:
+        self._set_shifter_recovery_active(True, reason)
         target_name = self.shifter_pending_target or "target"
         if not self.shifter_shift_slot:
             self.shifter_last_error = "no shift slot configured"
@@ -2280,6 +2398,7 @@ class AutoAAScript(ClientScriptBase):
         target_name = self.shifter_pending_target or "target"
         self._shifter_send_resume_attack()
         self._reset_shifter_runtime(clear_observed=False)
+        self._set_shifter_recovery_active(False)
         self.set_status(f"{target_name}: shifted; attack resumed")
         self.host.emit(
             "info",
@@ -2289,10 +2408,15 @@ class AutoAAScript(ClientScriptBase):
         self.host.notify_state_changed()
 
     def _tick_shifter_sequence(self):
-        if not self._is_shifter_weapon_mode() or not self.shifter_swap_stage:
+        if not self._is_shifter_weapon_mode():
             return
 
         now = time.monotonic()
+        if not self.shifter_swap_stage:
+            self._ensure_shifter_form_during_combat()
+            return
+
+        self._set_shifter_recovery_active(True, self.shifter_swap_stage)
         if self.shifter_swap_stage == "unshifting":
             if self.shifter_shift_state == "unshifted" or now >= self.shifter_unshift_deadline_at:
                 reason = "Player Hide" if self.shifter_shift_state == "unshifted" else "unshift wait elapsed"
@@ -2326,6 +2450,22 @@ class AutoAAScript(ClientScriptBase):
                         )
                         self._trigger_shifter_weapon_slot("weapon confirmation retry", preserve_retry_count=True)
                         return
+
+                if (
+                    now >= self.shifter_next_weapon_retry_at
+                    and self.pending_weapon_retry_count >= self.WEAPON_PENDING_MAX_RETRIES
+                    and self._recent_shifter_combat(now)
+                ):
+                    self.host.emit(
+                        "error",
+                        (
+                            f"{self.host.client.display_name}: {self._mode_label()} could not confirm "
+                            f"{self._pending_weapon_display()}; shifting back for combat safety"
+                        ),
+                        script_id=self.script_id,
+                    )
+                    self._confirm_shifter_weapon_ready("combat safety timeout")
+                    return
 
                 self.set_status(f"{self.shifter_pending_target}: waiting for {self._pending_weapon_display()} before re-shift")
                 return
@@ -4883,6 +5023,12 @@ class AutoAAScript(ClientScriptBase):
             "shifter_stage": self.shifter_swap_stage,
             "shifter_shift_slot": self._shifter_shift_display(),
             "shifter_shift_attempts": self.shifter_shift_attempts,
+            "shifter_recent_combat": self._recent_shifter_combat(),
+            "shifter_last_combat_age": (
+                max(time.monotonic() - self.shifter_last_combat_at, 0.0)
+                if self.shifter_last_combat_at
+                else None
+            ),
             "shifter_last_shift": self.shifter_last_shift_line,
             "shifter_last_essence": self.shifter_last_essence_line,
             "shifter_last_error": self.shifter_last_error,
@@ -5274,6 +5420,11 @@ class AutoActionScript(ClientScriptBase):
 
     def _run_loop(self):
         while not self.loop_stop.is_set():
+            if self.host.is_shifter_recovery_active():
+                self.set_status("Paused: shifter form recovery")
+                if self.loop_stop.wait(min(self._cooldown_seconds(), 0.50)):
+                    break
+                continue
             command = self._command_text()
             try:
                 result = self.host.send_chat(command, 2)
@@ -5366,6 +5517,11 @@ class AutoAttackScript(ClientScriptBase):
 
     def _run_loop(self):
         while not self.loop_stop.is_set():
+            if self.host.is_shifter_recovery_active():
+                self.set_status("Paused: shifter form recovery")
+                if self.loop_stop.wait(min(self._cooldown_seconds(), 0.50)):
+                    break
+                continue
             try:
                 result = self.host.send_chat(self.COMMAND, 2)
                 if result["success"]:
@@ -5464,6 +5620,11 @@ class AutoFollowScript(ClientScriptBase):
         now = time.monotonic()
         if now < self.cooldown_until:
             self.set_status(f"{speaker}: cooldown")
+            return True
+        if self.host.is_shifter_recovery_active():
+            self.cooldown_until = now + 1.0
+            self.set_status(f"{speaker}: paused for shifter form")
+            self.host.notify_state_changed()
             return True
 
         tell_command = f'/tell "{speaker}" !target'
@@ -6707,6 +6868,8 @@ class ClientScriptHost:
         self.last_slow_event_log_at = 0.0
         self.damage_meter_recorder = damage_meter.DamageMeterRecorder(self.client.pid)
         self.last_damage_meter_error = ""
+        self.shifter_recovery_until = 0.0
+        self.shifter_recovery_reason = ""
 
     def emit(self, level: str, message: str, script_id: Optional[str] = None):
         self.event_callback({
@@ -6733,6 +6896,26 @@ class ClientScriptHost:
                 },
             }
         self.event_callback(payload)
+
+    def set_shifter_recovery_active(self, active: bool, reason: str = "", ttl_seconds: float = 5.0):
+        with self.lock:
+            if active:
+                self.shifter_recovery_until = max(
+                    float(self.shifter_recovery_until or 0.0),
+                    time.monotonic() + max(float(ttl_seconds or 0.0), 0.5),
+                )
+                self.shifter_recovery_reason = str(reason or "shifter form recovery")
+            else:
+                self.shifter_recovery_until = 0.0
+                self.shifter_recovery_reason = ""
+
+    def is_shifter_recovery_active(self) -> bool:
+        with self.lock:
+            if time.monotonic() < float(self.shifter_recovery_until or 0.0):
+                return True
+            self.shifter_recovery_until = 0.0
+            self.shifter_recovery_reason = ""
+            return False
 
     def start_script(self, definition: ScriptDefinition, config: Dict[str, object]):
         with self.lock:

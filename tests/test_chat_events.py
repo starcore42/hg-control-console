@@ -7,6 +7,8 @@ from src.simkeys_app import simkeys_hgx_data as hgx_data
 from src.simkeys_app.simkeys_script_host import (
     ActiveOverlayTimer,
     AutoAAScript,
+    AutoDrinkScript,
+    AutoFollowScript,
     ChatLineEvent,
     ClientScriptBase,
     ClientScriptHost,
@@ -35,6 +37,8 @@ class FakeHost:
         self.overlays = []
         self.slots = []
         self.mask = 1 << 0
+        self.recovery_until = 0.0
+        self.recovery_reason = ""
 
     def emit(self, level, message, script_id=None):
         self.events.append((level, message, script_id))
@@ -47,6 +51,10 @@ class FakeHost:
 
     def send_chat(self, text, mode=2):
         self.chats.append(text)
+        return {"success": 1, "rc": 0, "err": 0}
+
+    def send_console(self, text):
+        self.chats.append(f"##{text}")
         return {"success": 1, "rc": 0, "err": 0}
 
     def trigger_slot(self, slot, page=0):
@@ -65,6 +73,21 @@ class FakeHost:
     def clear_overlay(self, overlay_id):
         self.overlays.append(("", {"overlay_id": overlay_id}))
         return {"success": 1, "rc": 0, "err": 0}
+
+    def set_shifter_recovery_active(self, active, reason="", ttl_seconds=5.0):
+        if active:
+            self.recovery_until = max(self.recovery_until, time.monotonic() + max(float(ttl_seconds), 0.5))
+            self.recovery_reason = str(reason or "shifter form recovery")
+        else:
+            self.recovery_until = 0.0
+            self.recovery_reason = ""
+
+    def is_shifter_recovery_active(self):
+        if time.monotonic() < self.recovery_until:
+            return True
+        self.recovery_until = 0.0
+        self.recovery_reason = ""
+        return False
 
 
 class RecordingScript(ClientScriptBase):
@@ -134,6 +157,10 @@ class ChatEventTests(unittest.TestCase):
         player_hide = parse_chat_line_event(5, "[CHAT WINDOW TEXT] [Sun Apr 26 12:00:04] Acquired Item: Player Hide")
         self.assertTrue(player_hide.player_hide)
         self.assertIn("player_hide", player_hide.kinds)
+
+        already_poly = parse_chat_line_event(6, "[CHAT WINDOW TEXT] [Sun Apr 26 12:00:05] You cannot change shape while already polymorphed!")
+        self.assertTrue(already_poly.shifter_already_polymorphed)
+        self.assertIn("shifter_state", already_poly.kinds)
 
         shadow_evade = parse_chat_line_event(6, "[CHAT WINDOW TEXT] [Sun Apr 26 12:00:05] Starcore-SD [4.0] casts Shadow Evade")
         self.assertIn("spell_cast", shadow_evade.kinds)
@@ -344,6 +371,92 @@ class ChatEventTests(unittest.TestCase):
         self.assertEqual(host.chats[-1], "!action attack locked")
         self.assertEqual(script.shifter_swap_stage, "")
         self.assertEqual(script.shifter_shift_state, "shifted")
+
+    def test_shifter_player_hide_in_recent_combat_starts_form_recovery(self):
+        host = FakeHost()
+        script = AutoAAScript(
+            host.client,
+            {
+                "mode": AutoAAScript.MODE_SHIFTER_WEAPON_SWAP,
+                "weapon_slot_1": "F1",
+                "shift_slot": "F9",
+            },
+            host,
+        )
+        script.on_start()
+        script.shifter_shift_state = "shifted"
+        script.on_chat_event(parse_chat_line_event(1, "Balor attacks Starcore-StormReaper [2.0] : *hit*"))
+        script.on_chat_event(parse_chat_line_event(2, "Acquired Item: Player Hide"))
+
+        self.assertEqual(script.shifter_swap_stage, "reshifting")
+        self.assertEqual(host.slots[-1], (0, 9))
+        self.assertTrue(host.is_shifter_recovery_active())
+
+    def test_shifter_already_polymorphed_confirms_form_recovery(self):
+        host = FakeHost()
+        script = AutoAAScript(
+            host.client,
+            {
+                "mode": AutoAAScript.MODE_SHIFTER_WEAPON_SWAP,
+                "weapon_slot_1": "F1",
+                "shift_slot": "F9",
+            },
+            host,
+        )
+        script.on_start()
+        script.shifter_shift_state = "unshifted"
+        script.shifter_last_combat_at = time.monotonic()
+
+        self.assertTrue(script._request_shifter_form_recovery("recent combat"))
+        self.assertEqual(host.slots[-1], (0, 9))
+        self.assertTrue(host.is_shifter_recovery_active())
+
+        script.on_chat_event(parse_chat_line_event(2, "You cannot change shape while already polymorphed!"))
+
+        self.assertEqual(script.shifter_shift_state, "shifted")
+        self.assertEqual(script.shifter_swap_stage, "")
+        self.assertFalse(host.is_shifter_recovery_active())
+        self.assertEqual(host.chats[-1], "!action attack locked")
+
+    def test_shifter_quickbar_weapon_indicator_in_combat_triggers_form_check(self):
+        host = FakeHost()
+        host.mask = 1 << 0
+        script = AutoAAScript(
+            host.client,
+            {
+                "mode": AutoAAScript.MODE_SHIFTER_WEAPON_SWAP,
+                "weapon_slot_1": "F1",
+                "shift_slot": "F9",
+            },
+            host,
+        )
+        script.on_start()
+        script.shifter_shift_state = "shifted"
+        script.shifter_last_shift_at = time.monotonic() - 10.0
+        script.on_chat_event(parse_chat_line_event(1, "Pit Fiend attacks someone : *hit*"))
+        script.on_tick()
+
+        self.assertEqual(script.shifter_shift_state, "unshifted")
+        self.assertEqual(script.shifter_swap_stage, "reshifting")
+        self.assertEqual(host.slots[-1], (0, 9))
+
+    def test_shifter_recovery_pauses_follow_and_drink(self):
+        host = FakeHost()
+        host.set_shifter_recovery_active(True, "test", ttl_seconds=5.0)
+
+        follow = AutoFollowScript(host.client, {"echo_console": False}, host)
+        follow.enabled = True
+        follow.follow_cues = follow.DEFAULT_FOLLOW_CUES
+        self.assertTrue(follow._handle_follow_line("Starcore-Lead [1.0]: follow me"))
+        self.assertEqual(host.chats, [])
+        self.assertIn("paused", follow.status_text)
+
+        drink = AutoDrinkScript(host.client, {"slot": 2, "echo_console": False}, host)
+        drink.enabled = True
+        drink._read_health_snapshot = lambda: (1, 100, 1.0, "test")
+        drink._poll_health_once()
+        self.assertEqual(host.slots, [])
+        self.assertIn("Paused", drink.status_text)
 
     def test_shifter_mode_only_swaps_when_current_weapon_heals(self):
         host = FakeHost()
