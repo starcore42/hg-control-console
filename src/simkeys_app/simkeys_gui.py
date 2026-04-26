@@ -156,12 +156,20 @@ class ScrollableFrame(ttk.Frame):
         self.interior.bind("<Leave>", self._unbind_mousewheel)
 
     def _on_interior_configure(self, _event=None):
-        self._sync_canvas_window()
+        try:
+            self._sync_canvas_window()
+        except tk.TclError:
+            pass
 
     def _on_canvas_configure(self, event):
-        self._sync_canvas_window(width=event.width, height=event.height)
+        try:
+            self._sync_canvas_window(width=event.width, height=event.height)
+        except tk.TclError:
+            pass
 
     def _sync_canvas_window(self, width=None, height=None):
+        if not self.winfo_exists() or not self.canvas.winfo_exists():
+            return
         if width is None:
             width = self.canvas.winfo_width()
         options = {"width": max(int(width), 1)}
@@ -173,19 +181,30 @@ class ScrollableFrame(ttk.Frame):
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
 
     def refresh(self):
-        self.update_idletasks()
-        self._sync_canvas_window()
+        try:
+            self._sync_canvas_window()
+        except tk.TclError:
+            pass
 
     def _bind_mousewheel(self, _event=None):
-        self.canvas.bind_all("<MouseWheel>", self._on_mousewheel)
+        try:
+            self.canvas.bind_all("<MouseWheel>", self._on_mousewheel)
+        except tk.TclError:
+            pass
 
     def _unbind_mousewheel(self, _event=None):
-        self.canvas.unbind_all("<MouseWheel>")
+        try:
+            self.canvas.unbind_all("<MouseWheel>")
+        except tk.TclError:
+            pass
 
     def _on_mousewheel(self, event):
         delta = int(-1 * (event.delta / 120))
         if delta:
-            self.canvas.yview_scroll(delta, "units")
+            try:
+                self.canvas.yview_scroll(delta, "units")
+            except tk.TclError:
+                pass
 
 
 class ScriptCard:
@@ -967,6 +986,8 @@ class SimKeysDesktopApp:
         self.log_text = None
         self.sections_scroller = None
         self.script_container = None
+        self.scroll_refresh_after_id = None
+        self.closing = False
         self.target_analysis_frame = None
         self.damage_meter_frame = None
         self.activity_log_frame = None
@@ -1579,18 +1600,34 @@ class SimKeysDesktopApp:
         self.refresh_scroll_regions()
 
     def refresh_scroll_regions(self):
+        if self.closing or self.scroll_refresh_after_id is not None:
+            return
         try:
-            self.root.after_idle(self._refresh_scroll_regions)
+            if not self.root.winfo_exists():
+                return
+            self.scroll_refresh_after_id = self.root.after_idle(self._run_refresh_scroll_regions)
         except tk.TclError:
+            self.scroll_refresh_after_id = None
             pass
+
+    def _run_refresh_scroll_regions(self):
+        self.scroll_refresh_after_id = None
+        if self.closing:
+            return
+        try:
+            self._refresh_scroll_regions()
+        except Exception as exc:
+            self.log(f"Error while refreshing scrolled regions: {exc}", "error")
 
     def _refresh_scroll_regions(self):
         for scroller in (self.sections_scroller,):
             if scroller is None:
                 continue
             try:
+                if not scroller.winfo_exists():
+                    continue
                 scroller.refresh()
-            except tk.TclError:
+            except Exception:
                 pass
 
     def _set_initial_pane_sizes(self):
@@ -2457,6 +2494,13 @@ class SimKeysDesktopApp:
         threading.Thread(target=worker, name=f"SimKeysEcho-{client.pid}", daemon=True).start()
 
     def on_close(self):
+        self.closing = True
+        if self.scroll_refresh_after_id is not None:
+            try:
+                self.root.after_cancel(self.scroll_refresh_after_id)
+            except tk.TclError:
+                pass
+            self.scroll_refresh_after_id = None
         try:
             self.persist_loaded_configs(self.selected_pid)
             self.script_manager.stop_all()
