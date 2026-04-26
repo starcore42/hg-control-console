@@ -132,8 +132,9 @@ def _weapon_mode_limit(mode):
 
 
 class ScrollableFrame(ttk.Frame):
-    def __init__(self, parent):
+    def __init__(self, parent, stretch_height=False):
         super().__init__(parent)
+        self.stretch_height = bool(stretch_height)
         self.columnconfigure(0, weight=1)
         self.rowconfigure(0, weight=1)
 
@@ -155,10 +156,25 @@ class ScrollableFrame(ttk.Frame):
         self.interior.bind("<Leave>", self._unbind_mousewheel)
 
     def _on_interior_configure(self, _event=None):
-        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        self._sync_canvas_window()
 
     def _on_canvas_configure(self, event):
-        self.canvas.itemconfigure(self.window_id, width=event.width)
+        self._sync_canvas_window(width=event.width, height=event.height)
+
+    def _sync_canvas_window(self, width=None, height=None):
+        if width is None:
+            width = self.canvas.winfo_width()
+        options = {"width": max(int(width), 1)}
+        if self.stretch_height:
+            if height is None:
+                height = self.canvas.winfo_height()
+            options["height"] = max(int(height), int(self.interior.winfo_reqheight()), 1)
+        self.canvas.itemconfigure(self.window_id, **options)
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+
+    def refresh(self):
+        self.update_idletasks()
+        self._sync_canvas_window()
 
     def _bind_mousewheel(self, _event=None):
         self.canvas.bind_all("<MouseWheel>", self._on_mousewheel)
@@ -765,6 +781,7 @@ class ScriptCard:
         else:
             self.body.grid_remove()
             self.expand_button.configure(text="Show Settings")
+        self.app.refresh_scroll_regions()
 
     def on_advanced_toggle(self):
         self.advanced_expanded = not self.advanced_expanded
@@ -774,6 +791,7 @@ class ScriptCard:
         else:
             self.advanced_body.grid_remove()
             self.advanced_toggle_var.set("Show Advanced")
+        self.app.refresh_scroll_regions()
 
     def on_auto_damage_mode_changed(self, _event=None):
         mode = str(self.vars["mode"][1].get()).strip()
@@ -822,6 +840,7 @@ class ScriptCard:
         self._set_holder_visible("shifter_healing_only", is_shifter)
         self._set_holder_visible("min_swap_gain_percent", is_weapon and not is_shifter)
         self._update_weapon_selector_ui()
+        self.app.refresh_scroll_regions()
 
     def _set_holder_visible(self, field_key, visible):
         holder = self.widget_holders.get(field_key)
@@ -946,6 +965,8 @@ class SimKeysDesktopApp:
         self.damage_meter_progress = None
         self.damage_meter_calculate_button = None
         self.log_text = None
+        self.sections_scroller = None
+        self.script_scroller = None
         self.analysis_paned = None
         self.target_analysis_frame = None
         self.damage_meter_frame = None
@@ -1221,10 +1242,11 @@ class SimKeysDesktopApp:
         self.client_tree.configure(yscrollcommand=client_scroll.set, xscrollcommand=client_xscroll.set)
         self.client_tree.bind("<<TreeviewSelect>>", self.on_client_selected)
 
-        right = ttk.Frame(paned)
-        right.columnconfigure(0, weight=1)
-        right.rowconfigure(3, weight=1)
-        paned.add(right, weight=5)
+        self.sections_scroller = ScrollableFrame(paned, stretch_height=True)
+        self.sections_scroller.interior.columnconfigure(0, weight=1)
+        self.sections_scroller.interior.rowconfigure(3, weight=1)
+        right = self.sections_scroller.interior
+        paned.add(self.sections_scroller, weight=5)
         self.root.after(250, self._set_initial_pane_sizes)
 
         details = ttk.LabelFrame(right, text="Client Details", padding=10)
@@ -1415,6 +1437,7 @@ class SimKeysDesktopApp:
         else:
             self.manual_controls_body.grid_remove()
             self.manual_controls_toggle_var.set("Show Test Controls")
+        self.refresh_scroll_regions()
 
     def toggle_damage_meter(self):
         self.damage_meter_expanded = not self.damage_meter_expanded
@@ -1429,6 +1452,7 @@ class SimKeysDesktopApp:
         else:
             self.damage_meter_text.grid_remove()
             self.damage_meter_toggle_var.set("Show Damage Meter")
+        self.refresh_scroll_regions()
 
     def _set_damage_meter_text(self, text):
         if self.damage_meter_text is None:
@@ -1487,6 +1511,7 @@ class SimKeysDesktopApp:
                 self.damage_meter_progress_frame.grid_remove()
         if calculating:
             self.damage_meter_progress_var.set(0.0)
+        self.refresh_scroll_regions()
 
     def _handle_damage_meter_progress(self, event):
         if int(event.get("run_id") or 0) != self.damage_meter_run_id:
@@ -1545,6 +1570,7 @@ class SimKeysDesktopApp:
             self.target_analysis_text.grid_remove()
             self.target_analysis_toggle_var.set("Show Target Analysis")
             self.root.after_idle(self._shrink_target_analysis_height)
+        self.refresh_scroll_regions()
 
     def toggle_activity_log(self):
         if self.activity_log_expanded:
@@ -1563,6 +1589,22 @@ class SimKeysDesktopApp:
             self.log_text.grid_remove()
             self.activity_log_toggle_var.set("Show Activity Log")
             self.root.after_idle(self._shrink_activity_log_height)
+        self.refresh_scroll_regions()
+
+    def refresh_scroll_regions(self):
+        try:
+            self.root.after_idle(self._refresh_scroll_regions)
+        except tk.TclError:
+            pass
+
+    def _refresh_scroll_regions(self):
+        for scroller in (self.script_scroller, self.sections_scroller):
+            if scroller is None:
+                continue
+            try:
+                scroller.refresh()
+            except tk.TclError:
+                pass
 
     def _remember_target_analysis_height(self):
         if self.analysis_paned is None:

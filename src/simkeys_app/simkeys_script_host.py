@@ -3983,6 +3983,7 @@ class AutoAAScript(ClientScriptBase):
         if profile is None:
             profile = self._profile_for_observed_damage(observed_types, now, damage_line.defender)
         if profile is None:
+            self._shift_away_from_observed_healing_damage(None, damage_line)
             return
 
         applied, signature_changed, new_types, new_estimates = self._apply_weapon_profile_observation(
@@ -3993,6 +3994,7 @@ class AutoAAScript(ClientScriptBase):
             is_critical=bool(attack_result.is_critical) if attack_result is not None else False,
         )
         if not applied:
+            self._shift_away_from_observed_healing_damage(profile, damage_line)
             return
 
         if signature_changed or new_types or new_estimates:
@@ -4012,6 +4014,84 @@ class AutoAAScript(ClientScriptBase):
                 ),
                 script_id=self.script_id,
             )
+        self._shift_away_from_observed_healing_damage(profile, damage_line)
+
+    def _observed_healing_damage_types(self, damage_line) -> Tuple[int, ...]:
+        stats = self.db.effective_stats(damage_line.defender)
+        if stats is None:
+            return ()
+
+        healing_types = set()
+        for component in damage_line.components:
+            amount = int(component.amount or 0)
+            damage_type = component.damage_type
+            if amount <= 0:
+                continue
+            if not isinstance(damage_type, int) or damage_type < 0 or damage_type >= len(stats.healing):
+                continue
+            if int(stats.healing[damage_type] or 0) != 0:
+                healing_types.add(damage_type)
+        return tuple(sorted(healing_types))
+
+    def _shift_away_from_observed_healing_damage(self, profile: Optional[WeaponLearningProfile], damage_line) -> bool:
+        healing_types = self._observed_healing_damage_types(damage_line)
+        if not healing_types:
+            return False
+
+        target_name = damage_line.defender
+        healing_text = ", ".join(_format_damage_type_label(value) for value in healing_types)
+        if self.pending_weapon_key:
+            self.set_status(f"{target_name}: healing observed ({healing_text}); awaiting {self._pending_weapon_display()}")
+            self.host.notify_state_changed()
+            return False
+
+        unsafe_key = ""
+        if profile is not None and profile.binding.key in self.weapon_profiles:
+            unsafe_key = profile.binding.key
+            self._set_current_weapon_from_equipped_key(unsafe_key, "damage healed target")
+        elif self.current_weapon_key in self.weapon_profiles:
+            unsafe_key = self.current_weapon_key
+
+        candidates = self._weapon_candidates_for_target(target_name)
+        safe_candidates = [
+            candidate
+            for candidate in candidates
+            if not candidate.healing_types and candidate.binding.key != unsafe_key
+        ]
+        protected_target = (not self._is_shifter_weapon_mode()) and self._is_mammons_tear_target(target_name)
+        if protected_target:
+            recommendation = self._mammon_wrath_candidate(safe_candidates)
+        else:
+            recommendation = self._choose_best_weapon(safe_candidates)
+
+        if recommendation is not None:
+            if self._request_weapon_swap(recommendation.binding, target_name, f"escape healing ({healing_text})"):
+                self.host.emit(
+                    "info",
+                    (
+                        f"{self.host.client.display_name}: {self._mode_label()} observed "
+                        f"{healing_text} healing on '{target_name}' from {self._binding_display(unsafe_key)}; "
+                        f"switching to {self._binding_display(recommendation.binding.key)}"
+                    ),
+                    script_id=self.script_id,
+                )
+                return True
+
+        if self._request_unarmed_fallback(target_name, f"unarm healing ({healing_text})"):
+            self.host.emit(
+                "info",
+                (
+                    f"{self.host.client.display_name}: {self._mode_label()} observed "
+                    f"{healing_text} healing on '{target_name}' from {self._binding_display(unsafe_key)}; "
+                    "using unarmed fallback"
+                ),
+                script_id=self.script_id,
+            )
+            return True
+
+        self.set_status(f"{target_name}: healing observed ({healing_text}); no safe swap")
+        self.host.notify_state_changed()
+        return False
 
     def _expected_component_damage_for_target(self, combat_profile, damage_type: int, base_damage: float) -> int:
         if combat_profile is None:

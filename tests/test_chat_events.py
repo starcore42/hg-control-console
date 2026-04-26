@@ -13,6 +13,7 @@ from src.simkeys_app.simkeys_script_host import (
     ClientScriptBase,
     ClientScriptHost,
     InGameTimersScript,
+    WeaponDamageEstimate,
     WeaponRecommendation,
     _default_status_rules_dir,
     _load_hgx_spell_timer_specs,
@@ -713,6 +714,106 @@ class ChatEventTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "base F1-F12"):
             script.on_start()
+
+    def test_weapon_mode_immediately_swaps_after_observed_healing_damage(self):
+        host = FakeHost()
+        script = AutoAAScript(
+            host.client,
+            {
+                "mode": AutoAAScript.MODE_WEAPON_SWAP,
+                "weapon_slot_1": "F1",
+                "weapon_slot_2": "F2",
+                "current_weapon": "W1",
+            },
+            host,
+        )
+        script.on_start()
+        script.db = hgx_data.load_character_database()
+        script.weapon_profiles["W1"].stable_signature = (4,)
+        script.weapon_profiles["W1"].stable_signature_observations = 2
+        script.weapon_profiles["W1"].type_estimates[4] = WeaponDamageEstimate(base_estimate=50.0, observations=2)
+        script.weapon_profiles["W2"].stable_signature = (6,)
+        script.weapon_profiles["W2"].stable_signature_observations = 2
+        script.weapon_profiles["W2"].type_estimates[6] = WeaponDamageEstimate(base_estimate=50.0, observations=2)
+
+        damage = parse_chat_line_event(
+            10,
+            (
+                "[CHAT WINDOW TEXT] [Sun Apr 26 12:00:01] "
+                "Starcore-StormReaper [2.0] damages Superior Algid Reaver : 42 (12 cold 30 physical)"
+            ),
+        )
+        script.on_chat_event(damage)
+
+        self.assertEqual(host.slots[-1], (0, 2))
+        self.assertEqual(script.pending_weapon_key, "W2")
+        self.assertIn("escape healing (Cold)", script.status_text)
+
+    def test_weapon_mode_does_not_double_press_when_healing_damage_arrives_during_pending_swap(self):
+        host = FakeHost()
+        script = AutoAAScript(
+            host.client,
+            {
+                "mode": AutoAAScript.MODE_WEAPON_SWAP,
+                "weapon_slot_1": "F1",
+                "weapon_slot_2": "F2",
+                "current_weapon": "W1",
+            },
+            host,
+        )
+        script.on_start()
+        script.db = hgx_data.load_character_database()
+        script.weapon_profiles["W1"].stable_signature = (4,)
+        script.weapon_profiles["W1"].stable_signature_observations = 2
+        script.weapon_profiles["W1"].type_estimates[4] = WeaponDamageEstimate(base_estimate=50.0, observations=2)
+        script.weapon_profiles["W2"].stable_signature = (6,)
+        script.weapon_profiles["W2"].stable_signature_observations = 2
+        script.weapon_profiles["W2"].type_estimates[6] = WeaponDamageEstimate(base_estimate=50.0, observations=2)
+        script.pending_weapon_key = "W2"
+        script.pending_weapon_ready_at = time.monotonic() + 5.0
+
+        damage = parse_chat_line_event(
+            10,
+            (
+                "[CHAT WINDOW TEXT] [Sun Apr 26 12:00:01] "
+                "Starcore-StormReaper [2.0] damages Superior Algid Reaver : 42 (12 cold 30 physical)"
+            ),
+        )
+        script.on_chat_event(damage)
+
+        self.assertEqual(host.slots, [])
+        self.assertEqual(script.pending_weapon_key, "W2")
+        self.assertIn("awaiting W2/F2", script.status_text)
+
+    def test_weapon_mode_unarms_after_observed_healing_damage_when_no_safe_weapon_exists(self):
+        host = FakeHost()
+        script = AutoAAScript(
+            host.client,
+            {
+                "mode": AutoAAScript.MODE_WEAPON_SWAP,
+                "weapon_slot_1": "F1",
+                "current_weapon": "W1",
+            },
+            host,
+        )
+        script.on_start()
+        script.db = hgx_data.load_character_database()
+        script.weapon_profiles["W1"].stable_signature = (4,)
+        script.weapon_profiles["W1"].stable_signature_observations = 2
+        script.weapon_profiles["W1"].type_estimates[4] = WeaponDamageEstimate(base_estimate=50.0, observations=2)
+
+        damage = parse_chat_line_event(
+            10,
+            (
+                "[CHAT WINDOW TEXT] [Sun Apr 26 12:00:01] "
+                "Starcore-StormReaper [2.0] damages Superior Algid Reaver : 42 (12 cold 30 physical)"
+            ),
+        )
+        script.on_chat_event(damage)
+
+        self.assertEqual(host.slots[-1], (0, 1))
+        self.assertTrue(script.pending_weapon_unarm)
+        self.assertIn("unarm healing (Cold)", script.status_text)
 
     def test_shifter_shift_ability_can_still_use_shift_or_ctrl_slot(self):
         host = FakeHost()
