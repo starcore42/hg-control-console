@@ -33,6 +33,11 @@ class DamageMeterTests(unittest.TestCase):
       <damage type="Fire" immunity="0" resistance="0" />
     </damageImmunities>
   </creature>
+  <creature name="Greater Swarm Master">
+    <damageImmunities>
+      <damage type="Fire" immunity="0" resistance="0" />
+    </damageImmunities>
+  </creature>
   <creature name="Superior Swarm Master">
     <damageImmunities>
       <damage type="Fire" immunity="0" resistance="0" />
@@ -163,6 +168,8 @@ class DamageMeterTests(unittest.TestCase):
                 [
                     {"time": 100.0, "pid": 1, "text": "Alice [1.0] damages Acid Blob : 100 (10 acid 60 fire 30 cold)"},
                     {"time": 100.1, "pid": 1, "text": "Alice [1.0] killed Advespa"},
+                    {"time": 100.8, "pid": 1, "text": "Bob [1.0] killed Swarm Master"},
+                    {"time": 100.9, "pid": 1, "text": "Bob [1.0] killed Greater Swarm Master"},
                     {"time": 101.0, "pid": 1, "text": "Bob [1.0] killed Superior Swarm Master"},
                     {"time": 101.1, "pid": 2, "text": "Bob [1.0] killed Superior Swarm Master"},
                     {"time": 102.0, "pid": 1, "text": "Bob [1.0] killed Elite Swarm Master"},
@@ -173,12 +180,24 @@ class DamageMeterTests(unittest.TestCase):
                 character_db=db,
             )
 
-        self.assertEqual(summary.enemy_kills_counted, 3)
+        self.assertEqual(summary.enemy_kills_counted, 5)
         self.assertEqual(summary.merged_kill_observations, 1)
         self.assertEqual(summary.enemy_kills["advespa"].variants, {"Advespa": 1})
         swarm = summary.enemy_kills["swarm master"]
-        self.assertEqual(swarm.total, 2)
-        self.assertEqual(swarm.variants, {"Superior Swarm Master": 1, "Elite Swarm Master": 1})
+        self.assertEqual(swarm.total, 4)
+        self.assertEqual(
+            swarm.variants,
+            {
+                "Swarm Master": 1,
+                "Greater Swarm Master": 1,
+                "Superior Swarm Master": 1,
+                "Elite Swarm Master": 1,
+            },
+        )
+        self.assertEqual(
+            [variant_name for variant_name, _count in swarm.sorted_variants()],
+            ["Swarm Master", "Greater Swarm Master", "Superior Swarm Master", "Elite Swarm Master"],
+        )
         self.assertEqual(summary.actors["Alice [1.0]"].damage_by_type, {"Fire": 60, "Cold": 30})
         self.assertEqual(summary.actors["Alice [1.0]"].healing_by_type, {"Acid": 60})
         self.assertEqual(summary.deaths_counted, 2)
@@ -188,9 +207,57 @@ class DamageMeterTests(unittest.TestCase):
         text = meter.format_summary_text(summary)
         self.assertIn("Party Damage Breakdown", text)
         self.assertIn("Enemy Counts", text)
-        self.assertIn("Swarm Master: 2", text)
+        self.assertIn("Tier totals: Standard 2, Greater 1, Superior 1, Elite 1", text)
+        self.assertIn("Swarm Master: 4", text)
+        self.assertNotIn("Greater Swarm Master: 1\n  Greater Swarm Master: 1", text)
+        self.assertIn("Advespa: 1\n  Advespa: 1\n\nSwarm Master: 4", text)
         self.assertIn("Party Deaths", text)
         self.assertIn("Alice [1.0]:", text)
+        self.assertIn("\n\n2. Bob [1.0] to Raja", text)
+        self.assertIn("Death Recaps\n" + meter.SECTION_BREAK, text)
+
+    def test_death_recap_tracks_incoming_damage_saves_and_killer_casts(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = self.make_db(tmpdir)
+            summary = meter.analyze_chat_records(
+                [
+                    {"time": 100.0, "pid": 1, "text": "Raja casts Finger of Death"},
+                    {"time": 100.1, "pid": 2, "text": "Raja casts unknown spell"},
+                    {
+                        "time": 103.0,
+                        "pid": 1,
+                        "text": "Alice [1.0] : Fortitude/Death Save vs. Raja : *failure* : (4 + 50 = 54 vs. DC: 72)",
+                    },
+                    {"time": 103.2, "pid": 1, "text": "Raja damages Alice [1.0]: 100 (30 Cold 70 Negative Energy)"},
+                    {"time": 103.25, "pid": 2, "text": "Raja damages Alice [1.0]: 100 (30 Cold 70 Negative Energy)"},
+                    {"time": 103.3, "pid": 1, "text": "Swarm Master damages Alice [1.0]: 25 (25 Fire)"},
+                    {"time": 103.4, "pid": 1, "text": "Raja killed Alice [1.0]"},
+                    {"time": 103.5, "pid": 1, "text": "Alice [1.0] averts death : Possum's Farce : *success*"},
+                ],
+                character_db=db,
+            )
+
+        self.assertEqual(summary.deaths_counted, 1)
+        self.assertEqual(len(summary.death_recaps), 1)
+        recap = summary.death_recaps[0]
+        self.assertEqual(recap.victim, "Alice [1.0]")
+        self.assertEqual(recap.cause, "Raja")
+        self.assertEqual(recap.recovery_method, "Possum's Farce")
+        self.assertEqual(recap.incoming_total, 125)
+        self.assertEqual(recap.incoming_by_type, {"Cold": 30, "Negative": 70, "Fire": 25})
+        self.assertEqual(recap.incoming_by_source, {"Raja": 100, "Swarm Master": 25})
+        self.assertTrue(any("Fortitude/Death vs. Raja" in line and "failure" in line for line in recap.failed_saves))
+        self.assertTrue(any("Raja cast Finger of Death" in line for line in recap.killer_spells))
+        self.assertTrue(any(line == "Swarm Master Fire25" for line in recap.last_hits))
+        self.assertTrue(any(line == "Raja Neg70/Cold30" for line in recap.last_hits))
+        self.assertTrue(all("before" not in line and "after" not in line for line in recap.last_hits))
+
+        text = meter.format_summary_text(summary)
+        self.assertIn("Death Recaps", text)
+        self.assertIn("Incoming: 125", text)
+        self.assertIn("Failed saves: Fortitude/Death vs. Raja", text)
+        self.assertIn("Killer casts: Raja cast Finger of Death", text)
+        self.assertIn("Last hits: Swarm Master Fire25; Raja Neg70/Cold30", text)
 
     def test_save_summary_text_uses_run_timestamp(self):
         with tempfile.TemporaryDirectory() as tmpdir:

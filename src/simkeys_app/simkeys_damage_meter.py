@@ -24,9 +24,23 @@ DEATH_EVENT_RE = re.compile(
 )
 MAX_CHAT_LINE_LENGTH = 230
 MERGE_TIME_WINDOW_SECONDS = 1.25
+DEATH_RECAP_LOOKBACK_SECONDS = 6.0
+DEATH_RECAP_AFTER_SECONDS = 0.75
+DEATH_RECAP_MAX_LAST_HITS = 5
+DEATH_RECAP_MAX_SAVES = 6
+DEATH_RECAP_MAX_SPELLS = 6
 UNKNOWN_ACTOR_LABEL = "Unknown"
 PROGRESS_EMIT_INTERVAL = 1000
-PARAGON_PREFIXES = ("Elite", "Superior", "Paragon")
+PARAGON_TIER_PREFIXES = ("Greater", "Superior", "Elite")
+PARAGON_PREFIXES = (*PARAGON_TIER_PREFIXES, "Paragon")
+PARAGON_TIER_LABELS = ("Standard", "Greater", "Superior", "Elite")
+SECTION_BREAK = "-" * 74
+SPELL_CAST_LINE_RE = re.compile(r"^(?P<caster>.+?)\s+casts\s+(?P<spell>.+?)\s*$", re.IGNORECASE)
+SAVE_LINE_RE = re.compile(
+    r"^(?P<target>.+?)\s*:\s*(?P<save>.+?)\s+Save vs\.?\s+(?P<source>.+?)\s*:\s*"
+    r"\*(?P<result>[^*]+)\*\s*:\s*\((?P<roll>.*?)\)\s*$",
+    re.IGNORECASE,
+)
 REPORT_ARCHIVE_TIMESTAMP_RE = re.compile(r"damage-meter_(?P<stamp>\d{8}_\d{6})(?:_\d+)?\.zip$", re.IGNORECASE)
 CHAT_TIMESTAMP_RE = re.compile(
     r"^\[CHAT WINDOW TEXT\]\s*\[(?P<stamp>[A-Z][a-z]{2}\s+[A-Z][a-z]{2}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2})\]",
@@ -57,6 +71,23 @@ _DAMAGE_TYPE_LABEL_BY_ID.update({
     10: "Negative",
     11: "Positive",
 })
+_DAMAGE_TYPE_ABBREVIATIONS = {
+    "Acid": "Acid",
+    "Bludgeoning": "Blud",
+    "Cold": "Cold",
+    "Divine": "Div",
+    "Electrical": "Elec",
+    "Fire": "Fire",
+    "Internal": "Int",
+    "Magical": "Mag",
+    "Negative": "Neg",
+    "Physical": "Phys",
+    "Piercing": "Pierce",
+    "Positive": "Pos",
+    "Psionic": "Psi",
+    "Slashing": "Slash",
+    "Sonic": "Sonic",
+}
 
 
 @dataclass(frozen=True)
@@ -98,10 +129,31 @@ class EnemyKillStats:
 
 
 @dataclass
+class DeathRecap:
+    victim: str
+    cause: str
+    event_time: Optional[float] = None
+    recovery_method: str = ""
+    incoming_total: int = 0
+    incoming_by_type: Dict[str, int] = field(default_factory=dict)
+    incoming_by_source: Dict[str, int] = field(default_factory=dict)
+    failed_saves: List[str] = field(default_factory=list)
+    recent_saves: List[str] = field(default_factory=list)
+    killer_spells: List[str] = field(default_factory=list)
+    nearby_spells: List[str] = field(default_factory=list)
+    last_hits: List[str] = field(default_factory=list)
+
+    @property
+    def is_averted(self) -> bool:
+        return bool(self.recovery_method)
+
+
+@dataclass
 class DeathStats:
     name: str
     deaths: int = 0
     killed_by: Dict[str, int] = field(default_factory=dict)
+    recaps: List[DeathRecap] = field(default_factory=list)
 
 
 @dataclass
@@ -127,6 +179,7 @@ class DamageMeterSummary:
     actors: Dict[str, DamageMeterActorStats] = field(default_factory=dict)
     enemy_kills: Dict[str, EnemyKillStats] = field(default_factory=dict)
     deaths: Dict[str, DeathStats] = field(default_factory=dict)
+    death_recaps: List[DeathRecap] = field(default_factory=list)
 
     @property
     def net(self) -> int:
@@ -146,6 +199,16 @@ class DamageMeterSummary:
 
     def sorted_deaths(self) -> List[DeathStats]:
         return sorted(self.deaths.values(), key=lambda item: (-item.deaths, item.name.casefold()))
+
+    def sorted_death_recaps(self) -> List[DeathRecap]:
+        return sorted(
+            self.death_recaps,
+            key=lambda item: (
+                item.event_time if item.event_time is not None else float("inf"),
+                item.victim.casefold(),
+                item.cause.casefold(),
+            ),
+        )
 
 
 @dataclass(frozen=True)
@@ -226,6 +289,45 @@ class DeathObservation:
     kind: str
 
 
+@dataclass(frozen=True)
+class SaveObservation:
+    index: int
+    sequence: int
+    pid: int
+    client_name: str
+    captured_at: float
+    event_time: Optional[float]
+    source_key: str
+    normalized_text: str
+    target: str
+    source: str
+    save: str
+    result: str
+    roll: str
+
+    @property
+    def is_failure(self) -> bool:
+        return "failure" in self.result.casefold()
+
+
+@dataclass(frozen=True)
+class SpellCastObservation:
+    index: int
+    sequence: int
+    pid: int
+    client_name: str
+    captured_at: float
+    event_time: Optional[float]
+    source_key: str
+    normalized_text: str
+    caster: str
+    spell: str
+
+    @property
+    def spell_is_unknown(self) -> bool:
+        return self.spell.casefold() == "unknown spell"
+
+
 @dataclass
 class DeathEventCluster:
     observations: List[DeathObservation] = field(default_factory=list)
@@ -255,6 +357,20 @@ class DeathEventCluster:
         if kill_causes:
             return _choose_cluster_actor(kill_causes)
         return self.representative.cause or "Unknown"
+
+    @property
+    def recovery_method(self) -> str:
+        methods = [
+            observation.cause
+            for observation in self.observations
+            if observation.kind == "death" and "averts death" in observation.normalized_text.casefold()
+        ]
+        if not methods:
+            return ""
+        for method in methods:
+            if method:
+                return method
+        return "Unknown"
 
 
 @dataclass
@@ -290,6 +406,72 @@ class DamageEventCluster:
             and not _is_ambiguous_actor(self.attacker)
             and not _is_ambiguous_actor(self.defender)
         )
+
+
+@dataclass
+class SaveEventCluster:
+    observations: List[SaveObservation] = field(default_factory=list)
+
+    @property
+    def representative(self) -> SaveObservation:
+        return max(
+            self.observations,
+            key=lambda observation: (
+                1 if observation.is_failure else 0,
+                _actor_specificity(observation.target) + _actor_specificity(observation.source),
+                len(observation.save),
+                -observation.index,
+            ),
+        )
+
+    @property
+    def target(self) -> str:
+        return _choose_cluster_actor(observation.target for observation in self.observations)
+
+    @property
+    def source(self) -> str:
+        return _choose_cluster_actor(observation.source for observation in self.observations)
+
+    @property
+    def save(self) -> str:
+        return self.representative.save
+
+    @property
+    def result(self) -> str:
+        return self.representative.result
+
+    @property
+    def roll(self) -> str:
+        return self.representative.roll
+
+    @property
+    def is_failure(self) -> bool:
+        return any(observation.is_failure for observation in self.observations)
+
+
+@dataclass
+class SpellCastEventCluster:
+    observations: List[SpellCastObservation] = field(default_factory=list)
+
+    @property
+    def representative(self) -> SpellCastObservation:
+        return max(
+            self.observations,
+            key=lambda observation: (
+                0 if observation.spell_is_unknown else 1,
+                _actor_specificity(observation.caster),
+                len(observation.spell),
+                -observation.index,
+            ),
+        )
+
+    @property
+    def caster(self) -> str:
+        return _choose_cluster_actor(observation.caster for observation in self.observations)
+
+    @property
+    def spell(self) -> str:
+        return self.representative.spell
 
 
 class DamageMeterRecorder:
@@ -690,6 +872,8 @@ def analyze_chat_records(
     observations = []
     kill_observations = []
     death_observations = []
+    save_observations = []
+    spell_observations = []
     for index, record in enumerate(records, start=1):
         if index == 1 or index % PROGRESS_EMIT_INTERVAL == 0:
             _emit_progress(progress_callback, "Parsing damage lines", index, 0)
@@ -755,6 +939,45 @@ def analyze_chat_records(
                     )
                 )
 
+        parsed_save = _parse_save_line(text)
+        if parsed_save is not None:
+            target, source, save, result, roll = parsed_save
+            save_observations.append(
+                SaveObservation(
+                    index=index,
+                    sequence=sequence,
+                    pid=pid,
+                    client_name=client_name,
+                    captured_at=captured_at,
+                    event_time=event_time,
+                    source_key=source_key,
+                    normalized_text=hgx_combat.normalize_chat_line(text),
+                    target=target,
+                    source=source,
+                    save=save,
+                    result=result,
+                    roll=roll,
+                )
+            )
+
+        parsed_spell = _parse_spell_cast_line(text)
+        if parsed_spell is not None:
+            caster, spell = parsed_spell
+            spell_observations.append(
+                SpellCastObservation(
+                    index=index,
+                    sequence=sequence,
+                    pid=pid,
+                    client_name=client_name,
+                    captured_at=captured_at,
+                    event_time=event_time,
+                    source_key=source_key,
+                    normalized_text=hgx_combat.normalize_chat_line(text),
+                    caster=caster,
+                    spell=spell,
+                )
+            )
+
         damage = hgx_combat.parse_damage_line(text)
         if damage is None:
             continue
@@ -786,13 +1009,16 @@ def analyze_chat_records(
         _add_enemy_kill(summary, victim)
 
     death_clusters = _merge_death_observations(death_observations)
+    clusters = _merge_damage_observations(observations, progress_callback=progress_callback)
+    save_clusters = _merge_save_observations(save_observations)
+    spell_clusters = _merge_spell_cast_observations(spell_observations)
     for cluster in death_clusters:
         victim = cluster.victim
         if not _is_party_actor(victim, db):
             continue
-        _add_death(summary, victim, cluster.cause)
+        recap = _build_death_recap(cluster, clusters, save_clusters, spell_clusters, db)
+        _add_death(summary, victim, cluster.cause, recap)
 
-    clusters = _merge_damage_observations(observations, progress_callback=progress_callback)
     summary.merged_observations = max(len(observations) - len(clusters), 0)
     total_clusters = len(clusters)
     _emit_progress(progress_callback, "Classifying damage", 0, total_clusters)
@@ -870,7 +1096,7 @@ def format_summary_text(summary: DamageMeterSummary, actor_limit: int = 1000) ->
         lines.append("")
         lines.append("Damage Summary")
         lines.append(f"{'Name':<32} {'Net':>10} {'Raw':>10} {'Healing':>10} {'Hits':>6}")
-        lines.append("-" * 74)
+        lines.append(SECTION_BREAK)
         for actor in actors[:actor_limit]:
             lines.append(
                 f"{_trim(actor.name, 32):<32} "
@@ -886,7 +1112,10 @@ def format_summary_text(summary: DamageMeterSummary, actor_limit: int = 1000) ->
 
         lines.append("")
         lines.append("Party Damage Breakdown")
-        for actor in actors[:actor_limit]:
+        lines.append(SECTION_BREAK)
+        for index, actor in enumerate(actors[:actor_limit], start=1):
+            if index > 1:
+                lines.append("")
             lines.append(f"{actor.name}:")
             lines.append(f"  Damage: {_format_counts(actor.damage_by_type, limit=24)}")
             if actor.raw_healing:
@@ -894,24 +1123,66 @@ def format_summary_text(summary: DamageMeterSummary, actor_limit: int = 1000) ->
 
     lines.append("")
     lines.append("Enemy Counts")
+    lines.append(SECTION_BREAK)
     enemy_groups = summary.sorted_enemy_kills()
     if not enemy_groups:
         lines.append("-")
     else:
-        for group in enemy_groups:
+        lines.append("Tier totals: " + _format_enemy_tier_totals(summary.enemy_kills))
+        for index, group in enumerate(enemy_groups, start=1):
+            if index > 1:
+                lines.append("")
             lines.append(f"{group.base_name}: {group.total:,}")
             for variant_name, count in group.sorted_variants():
                 lines.append(f"  {variant_name}: {count:,}")
 
     lines.append("")
     lines.append("Party Deaths")
+    lines.append(SECTION_BREAK)
     death_stats = summary.sorted_deaths()
     if not death_stats:
         lines.append("-")
     else:
-        for death in death_stats:
+        for index, death in enumerate(death_stats, start=1):
+            if index > 1:
+                lines.append("")
             lines.append(f"{death.name}: {death.deaths:,}")
             lines.append(f"  To: {_format_counts(death.killed_by, limit=24)}")
+
+    lines.append("")
+    lines.append("Death Recaps")
+    lines.append(SECTION_BREAK)
+    recaps = summary.sorted_death_recaps()
+    if not recaps:
+        lines.append("-")
+    else:
+        for index, recap in enumerate(recaps, start=1):
+            if index > 1:
+                lines.append("")
+            status = f" (averted by {recap.recovery_method})" if recap.recovery_method else ""
+            lines.append(
+                f"{index}. {recap.victim} to {recap.cause}{status}"
+                f"{_format_recap_time(recap.event_time)}"
+            )
+            if recap.incoming_total:
+                lines.append(f"  Incoming: {recap.incoming_total:,} ({_format_counts(recap.incoming_by_type, limit=16)})")
+                lines.append(f"  Sources: {_format_counts(recap.incoming_by_source, limit=8)}")
+            else:
+                lines.append("  Incoming: -")
+            if recap.failed_saves:
+                lines.append(f"  Failed saves: {'; '.join(recap.failed_saves[:DEATH_RECAP_MAX_SAVES])}")
+            elif recap.recent_saves:
+                lines.append(f"  Saves: {'; '.join(recap.recent_saves[:DEATH_RECAP_MAX_SAVES])}")
+            else:
+                lines.append("  Saves: -")
+            if recap.killer_spells:
+                lines.append(f"  Killer casts: {'; '.join(recap.killer_spells[:DEATH_RECAP_MAX_SPELLS])}")
+            elif recap.nearby_spells:
+                lines.append(f"  Nearby casts: {'; '.join(recap.nearby_spells[:DEATH_RECAP_MAX_SPELLS])}")
+            else:
+                lines.append("  Casts: -")
+            if recap.last_hits:
+                lines.append(f"  Last hits: {'; '.join(recap.last_hits[:DEATH_RECAP_MAX_LAST_HITS])}")
 
     return "\n".join(lines)
 
@@ -1016,6 +1287,37 @@ def _parse_death_event_line(text: str) -> Optional[Tuple[str, str]]:
     return player, method
 
 
+def _parse_save_line(text: str) -> Optional[Tuple[str, str, str, str, str]]:
+    normalized = hgx_combat.normalize_chat_line(text)
+    if " save vs" not in normalized.casefold():
+        return None
+    match = SAVE_LINE_RE.match(normalized)
+    if match is None:
+        return None
+    target = hgx_combat.normalize_actor_name(match.group("target"))
+    source = hgx_combat.normalize_actor_name(match.group("source"))
+    save = hgx_combat.normalize_actor_name(match.group("save"))
+    result = hgx_combat.normalize_actor_name(match.group("result"))
+    roll = hgx_combat.normalize_actor_name(match.group("roll"))
+    if not target or not source or not save or not result:
+        return None
+    return target, source, save, result, roll
+
+
+def _parse_spell_cast_line(text: str) -> Optional[Tuple[str, str]]:
+    normalized = hgx_combat.normalize_chat_line(text)
+    if " casts " not in normalized.casefold():
+        return None
+    match = SPELL_CAST_LINE_RE.match(normalized)
+    if match is None:
+        return None
+    caster = hgx_combat.normalize_actor_name(match.group("caster"))
+    spell = hgx_combat.normalize_actor_name(match.group("spell"))
+    if not caster or not spell:
+        return None
+    return caster, spell
+
+
 def _add_enemy_kill(summary: DamageMeterSummary, enemy_name: str):
     base_name, variant_name = _enemy_base_and_variant(enemy_name)
     key = base_name.casefold()
@@ -1028,7 +1330,7 @@ def _add_enemy_kill(summary: DamageMeterSummary, enemy_name: str):
     summary.enemy_kills_counted += 1
 
 
-def _add_death(summary: DamageMeterSummary, victim: str, cause: str):
+def _add_death(summary: DamageMeterSummary, victim: str, cause: str, recap: Optional[DeathRecap] = None):
     name = hgx_combat.normalize_actor_name(victim)
     cause_name = hgx_combat.normalize_actor_name(cause) or "Unknown"
     if not name:
@@ -1039,6 +1341,9 @@ def _add_death(summary: DamageMeterSummary, victim: str, cause: str):
         summary.deaths[name] = stats
     stats.deaths += 1
     stats.killed_by[cause_name] = int(stats.killed_by.get(cause_name, 0)) + 1
+    if recap is not None:
+        stats.recaps.append(recap)
+        summary.death_recaps.append(recap)
     summary.deaths_counted += 1
 
 
@@ -1058,14 +1363,37 @@ def _enemy_base_and_variant(enemy_name: str) -> Tuple[str, str]:
 
 
 def _enemy_variant_sort_key(variant_name: str, base_name: str) -> Tuple[int, str]:
-    variant_key = variant_name.casefold()
-    base_key = base_name.casefold()
+    return _enemy_variant_tier_index(variant_name, base_name), variant_name.casefold()
+
+
+def _enemy_variant_tier_index(variant_name: str, base_name: str) -> int:
+    variant_key = hgx_combat.normalize_actor_name(variant_name).casefold()
+    base_key = hgx_combat.normalize_actor_name(base_name).casefold()
     if variant_key == base_key:
-        return 0, variant_key
-    for index, prefix in enumerate(PARAGON_PREFIXES, start=1):
+        return 0
+    for index, prefix in enumerate(PARAGON_TIER_PREFIXES, start=1):
         if variant_key == f"{prefix} {base_name}".casefold():
-            return index, variant_key
-    return len(PARAGON_PREFIXES) + 1, variant_key
+            return index
+    return len(PARAGON_TIER_LABELS)
+
+
+def _format_enemy_tier_totals(enemy_kills: Dict[str, EnemyKillStats]) -> str:
+    totals = [0 for _label in PARAGON_TIER_LABELS]
+    other_total = 0
+    for group in enemy_kills.values():
+        for variant_name, count in group.variants.items():
+            tier_index = _enemy_variant_tier_index(variant_name, group.base_name)
+            if 0 <= tier_index < len(totals):
+                totals[tier_index] += int(count or 0)
+            else:
+                other_total += int(count or 0)
+    parts = [
+        f"{label} {total:,}"
+        for label, total in zip(PARAGON_TIER_LABELS, totals)
+    ]
+    if other_total:
+        parts.append(f"Other {other_total:,}")
+    return ", ".join(parts)
 
 
 def _classify_damage_line(damage, db, defender_name: Optional[str] = None):
@@ -1100,6 +1428,161 @@ def _classify_damage_line(damage, db, defender_name: Optional[str] = None):
             _add_count(damage_by_type, label, amount)
 
     return raw_damage, raw_healing, damage_by_type, healing_by_type, unknown_types
+
+
+def _build_death_recap(
+    death_cluster: DeathEventCluster,
+    damage_clusters: List[DamageEventCluster],
+    save_clusters: List[SaveEventCluster],
+    spell_clusters: List[SpellCastEventCluster],
+    db,
+) -> DeathRecap:
+    victim = death_cluster.victim
+    cause = death_cluster.cause
+    event_time = _cluster_first_time(death_cluster)
+    start_time = None if event_time is None else event_time - DEATH_RECAP_LOOKBACK_SECONDS
+    end_time = None if event_time is None else event_time + DEATH_RECAP_AFTER_SECONDS
+
+    recap = DeathRecap(
+        victim=victim,
+        cause=cause,
+        event_time=event_time,
+        recovery_method=death_cluster.recovery_method,
+    )
+
+    incoming_hits = []
+    for damage_cluster in damage_clusters:
+        if not _actors_compatible(damage_cluster.defender, victim):
+            continue
+        if not _cluster_overlaps_window(damage_cluster, start_time, end_time):
+            continue
+        if _same_specific_actor(damage_cluster.attacker, victim):
+            continue
+
+        damage = damage_cluster.representative.damage
+        hit_by_type = _positive_damage_by_type(damage)
+        hit_total = sum(hit_by_type.values())
+        if hit_total <= 0:
+            continue
+
+        source = UNKNOWN_ACTOR_LABEL if _is_ambiguous_actor(damage_cluster.attacker) else damage_cluster.attacker
+        _merge_counts(recap.incoming_by_type, hit_by_type)
+        _add_count(recap.incoming_by_source, source, hit_total)
+        recap.incoming_total += hit_total
+        incoming_hits.append((
+            _cluster_last_time(damage_cluster),
+            source,
+            hit_total,
+            hit_by_type,
+        ))
+
+    incoming_hits.sort(key=lambda item: (item[0] if item[0] is not None else float("-inf")), reverse=True)
+    for hit_time, source, _hit_total, hit_by_type in incoming_hits[:DEATH_RECAP_MAX_LAST_HITS]:
+        recap.last_hits.append(
+            f"{_trim(source, 24)} {_format_counts_short(hit_by_type, limit=6)}"
+        )
+
+    recent_saves = []
+    for save_cluster in save_clusters:
+        if not _actors_compatible(save_cluster.target, victim):
+            continue
+        if not _cluster_overlaps_window(save_cluster, start_time, end_time):
+            continue
+        recent_saves.append(save_cluster)
+
+    recent_saves.sort(
+        key=lambda item: (
+            1 if item.is_failure else 0,
+            item.representative.event_time if item.representative.event_time is not None else float("-inf"),
+        ),
+        reverse=True,
+    )
+    for save_cluster in recent_saves[:DEATH_RECAP_MAX_SAVES]:
+        text = _format_save_cluster(save_cluster, event_time)
+        if save_cluster.is_failure:
+            recap.failed_saves.append(text)
+        else:
+            recap.recent_saves.append(text)
+
+    killer_spells = []
+    nearby_spells = []
+    for spell_cluster in spell_clusters:
+        if not _cluster_overlaps_window(spell_cluster, start_time, end_time):
+            continue
+        if _actors_compatible(spell_cluster.caster, cause) and not _is_ambiguous_actor(cause):
+            killer_spells.append(spell_cluster)
+        elif _is_enemy(spell_cluster.caster, db) or _is_ambiguous_actor(spell_cluster.caster):
+            nearby_spells.append(spell_cluster)
+
+    killer_spells.sort(key=lambda item: item.representative.event_time if item.representative.event_time is not None else float("-inf"), reverse=True)
+    nearby_spells.sort(key=lambda item: item.representative.event_time if item.representative.event_time is not None else float("-inf"), reverse=True)
+    for spell_cluster in _unique_spell_clusters(killer_spells)[:DEATH_RECAP_MAX_SPELLS]:
+        recap.killer_spells.append(_format_spell_cluster(spell_cluster, event_time))
+    for spell_cluster in _unique_spell_clusters(nearby_spells)[:DEATH_RECAP_MAX_SPELLS]:
+        recap.nearby_spells.append(_format_spell_cluster(spell_cluster, event_time))
+
+    return recap
+
+
+def _positive_damage_by_type(damage) -> Dict[str, int]:
+    values: Dict[str, int] = {}
+    for component in damage.components:
+        amount = int(component.amount or 0)
+        if amount <= 0:
+            continue
+        _add_count(values, _damage_type_label(component), amount)
+    return values
+
+
+def _format_save_cluster(cluster: SaveEventCluster, death_time: Optional[float]) -> str:
+    result = cluster.result
+    if cluster.roll:
+        result = f"{result} ({cluster.roll})"
+    return (
+        f"{cluster.save} vs. {_trim(cluster.source, 30)}: "
+        f"{result}{_format_recap_offset(cluster.representative.event_time, death_time)}"
+    )
+
+
+def _format_spell_cluster(cluster: SpellCastEventCluster, death_time: Optional[float]) -> str:
+    return f"{_trim(cluster.caster, 30)} cast {cluster.spell}{_format_recap_offset(cluster.representative.event_time, death_time)}"
+
+
+def _format_recap_offset(event_time: Optional[float], death_time: Optional[float]) -> str:
+    if event_time is None or death_time is None:
+        return ""
+    delta = float(event_time) - float(death_time)
+    if abs(delta) < 0.05:
+        return " at death"
+    if delta < 0:
+        return f" {abs(delta):.1f}s before"
+    return f" {delta:.1f}s after"
+
+
+def _format_recap_time(event_time: Optional[float]) -> str:
+    if event_time is None:
+        return ""
+    try:
+        timestamp = float(event_time)
+    except (TypeError, ValueError):
+        return ""
+    if timestamp <= 0:
+        return ""
+    if timestamp < 946684800:
+        return f" at t+{timestamp:.1f}"
+    return " at " + time.strftime("%H:%M:%S", time.localtime(timestamp))
+
+
+def _unique_spell_clusters(clusters: List[SpellCastEventCluster]) -> List[SpellCastEventCluster]:
+    results = []
+    seen = set()
+    for cluster in clusters:
+        key = (_actor_key(cluster.caster), _spell_key(cluster.spell))
+        if key in seen:
+            continue
+        seen.add(key)
+        results.append(cluster)
+    return results
 
 
 def _merge_damage_observations(
@@ -1267,6 +1750,132 @@ def _death_cluster_match_score(cluster: DeathEventCluster, observation: DeathObs
     return shared_specific_names, -time_distance, has_kill
 
 
+def _merge_save_observations(observations: List[SaveObservation]) -> List[SaveEventCluster]:
+    clusters: List[SaveEventCluster] = []
+    candidates: List[SaveEventCluster] = []
+    for observation in sorted(
+        observations,
+        key=lambda item: (item.event_time if item.event_time is not None else float("inf"), item.index),
+    ):
+        if observation.event_time is not None:
+            _prune_timed_cluster_candidates(candidates, observation.event_time)
+        cluster = _find_matching_save_cluster(candidates, observation)
+        if cluster is None:
+            cluster = SaveEventCluster(observations=[observation])
+            clusters.append(cluster)
+            candidates.append(cluster)
+        else:
+            cluster.observations.append(observation)
+    return clusters
+
+
+def _find_matching_save_cluster(
+    clusters: List[SaveEventCluster],
+    observation: SaveObservation,
+) -> Optional[SaveEventCluster]:
+    best_cluster = None
+    best_score = None
+    for cluster in clusters:
+        if not _save_cluster_can_accept(cluster, observation):
+            continue
+        score = _save_cluster_match_score(cluster, observation)
+        if best_score is None or score > best_score:
+            best_score = score
+            best_cluster = cluster
+    return best_cluster
+
+
+def _save_cluster_can_accept(cluster: SaveEventCluster, observation: SaveObservation) -> bool:
+    if any(existing.source_key == observation.source_key for existing in cluster.observations):
+        return False
+    reference = cluster.representative
+    if not _times_compatible(reference, observation):
+        return False
+    if not _actors_compatible(cluster.target, observation.target):
+        return False
+    if not _actors_compatible(cluster.source, observation.source):
+        return False
+    if _save_key(cluster.save) != _save_key(observation.save):
+        return False
+    if cluster.representative.roll and observation.roll and cluster.representative.roll != observation.roll:
+        return False
+    return True
+
+
+def _save_cluster_match_score(cluster: SaveEventCluster, observation: SaveObservation) -> Tuple[int, float, int]:
+    reference = cluster.representative
+    shared_specific_names = 0
+    if _same_specific_actor(cluster.target, observation.target):
+        shared_specific_names += 1
+    if _same_specific_actor(cluster.source, observation.source):
+        shared_specific_names += 1
+    if reference.event_time is None or observation.event_time is None:
+        time_distance = 0.0 if reference.normalized_text == observation.normalized_text else MERGE_TIME_WINDOW_SECONDS
+    else:
+        time_distance = abs(reference.event_time - observation.event_time)
+    specificity = _actor_specificity(cluster.target) + _actor_specificity(cluster.source)
+    return shared_specific_names, -time_distance, specificity
+
+
+def _merge_spell_cast_observations(observations: List[SpellCastObservation]) -> List[SpellCastEventCluster]:
+    clusters: List[SpellCastEventCluster] = []
+    candidates: List[SpellCastEventCluster] = []
+    for observation in sorted(
+        observations,
+        key=lambda item: (item.event_time if item.event_time is not None else float("inf"), item.index),
+    ):
+        if observation.event_time is not None:
+            _prune_timed_cluster_candidates(candidates, observation.event_time)
+        cluster = _find_matching_spell_cast_cluster(candidates, observation)
+        if cluster is None:
+            cluster = SpellCastEventCluster(observations=[observation])
+            clusters.append(cluster)
+            candidates.append(cluster)
+        else:
+            cluster.observations.append(observation)
+    return clusters
+
+
+def _find_matching_spell_cast_cluster(
+    clusters: List[SpellCastEventCluster],
+    observation: SpellCastObservation,
+) -> Optional[SpellCastEventCluster]:
+    best_cluster = None
+    best_score = None
+    for cluster in clusters:
+        if not _spell_cast_cluster_can_accept(cluster, observation):
+            continue
+        score = _spell_cast_cluster_match_score(cluster, observation)
+        if best_score is None or score > best_score:
+            best_score = score
+            best_cluster = cluster
+    return best_cluster
+
+
+def _spell_cast_cluster_can_accept(cluster: SpellCastEventCluster, observation: SpellCastObservation) -> bool:
+    if any(existing.source_key == observation.source_key for existing in cluster.observations):
+        return False
+    reference = cluster.representative
+    if not _times_compatible(reference, observation):
+        return False
+    if not _actors_compatible(cluster.caster, observation.caster):
+        return False
+    if not _spell_names_compatible(cluster.spell, observation.spell):
+        return False
+    return True
+
+
+def _spell_cast_cluster_match_score(cluster: SpellCastEventCluster, observation: SpellCastObservation) -> Tuple[int, float, int]:
+    reference = cluster.representative
+    shared_specific_names = 1 if _same_specific_actor(cluster.caster, observation.caster) else 0
+    if reference.event_time is None or observation.event_time is None:
+        time_distance = 0.0 if reference.normalized_text == observation.normalized_text else MERGE_TIME_WINDOW_SECONDS
+    else:
+        time_distance = abs(reference.event_time - observation.event_time)
+    known_spell = 0 if _spell_is_unknown(cluster.spell) and _spell_is_unknown(observation.spell) else 1
+    return shared_specific_names, -time_distance, known_spell
+
+
 def _observation_merge_signature_key(observation: DamageObservation) -> Tuple[int, Tuple[Tuple[int, object], ...]]:
     return int(observation.damage.total), observation.component_signature
 
@@ -1280,6 +1889,33 @@ def _cluster_latest_time(cluster: DamageEventCluster) -> Optional[float]:
     if not times:
         return None
     return max(times)
+
+
+def _cluster_first_time(cluster) -> Optional[float]:
+    times = [
+        float(observation.event_time)
+        for observation in cluster.observations
+        if observation.event_time is not None
+    ]
+    if not times:
+        return None
+    return min(times)
+
+
+def _cluster_last_time(cluster) -> Optional[float]:
+    return _cluster_latest_time(cluster)
+
+
+def _cluster_overlaps_window(cluster, start_time: Optional[float], end_time: Optional[float]) -> bool:
+    if start_time is None or end_time is None:
+        return True
+    for observation in cluster.observations:
+        if observation.event_time is None:
+            continue
+        event_time = float(observation.event_time)
+        if float(start_time) <= event_time <= float(end_time):
+            return True
+    return False
 
 
 def _prune_timed_cluster_candidates(candidates: List[DamageEventCluster], event_time: float):
@@ -1386,6 +2022,26 @@ def _actor_key(name: str) -> str:
     return hgx_combat.normalize_actor_name(name).casefold()
 
 
+def _save_key(name: str) -> str:
+    return re.sub(r"\s+", " ", hgx_combat.normalize_actor_name(name).casefold()).strip()
+
+
+def _spell_key(name: str) -> str:
+    return re.sub(r"\s+", " ", hgx_combat.normalize_actor_name(name).casefold()).strip()
+
+
+def _spell_is_unknown(name: str) -> bool:
+    return _spell_key(name) == "unknown spell"
+
+
+def _spell_names_compatible(left: str, right: str) -> bool:
+    left_key = _spell_key(left)
+    right_key = _spell_key(right)
+    if not left_key or not right_key:
+        return False
+    return left_key == right_key or left_key == "unknown spell" or right_key == "unknown spell"
+
+
 def _component_signature(damage) -> Tuple[Tuple[int, object], ...]:
     signature = []
     for component in damage.components:
@@ -1466,6 +2122,28 @@ def _format_counts(values: Dict[str, int], limit: int = 14) -> str:
     if len(values) > limit:
         parts.append(f"+{len(values) - limit} more")
     return ", ".join(parts)
+
+
+def _format_counts_short(values: Dict[str, int], limit: int = 8) -> str:
+    if not values:
+        return "-"
+    parts = [
+        f"{_damage_type_abbreviation(key)}{value:,}"
+        for key, value in sorted(values.items(), key=lambda item: (-item[1], item[0].casefold()))[:limit]
+    ]
+    if len(values) > limit:
+        parts.append(f"+{len(values) - limit}")
+    return "/".join(parts)
+
+
+def _damage_type_abbreviation(label: str) -> str:
+    text = str(label or "").strip()
+    if text in _DAMAGE_TYPE_ABBREVIATIONS:
+        return _DAMAGE_TYPE_ABBREVIATIONS[text]
+    compact = re.sub(r"[^A-Za-z0-9]+", "", text)
+    if not compact:
+        return "Dmg"
+    return compact[:6]
 
 
 def _actor_fragments(actors: List[DamageMeterActorStats], attr: str, limit: int) -> List[str]:

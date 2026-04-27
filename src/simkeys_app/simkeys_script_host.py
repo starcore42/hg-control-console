@@ -42,7 +42,13 @@ WEAPON_ELEMENTAL_TYPES = frozenset({3, 4, 5, 6, 7})
 WEAPON_EXOTIC_TYPES = frozenset({8, 9, 10, 11})
 WEAPON_SIGNATURE_TYPES = frozenset(set(WEAPON_ELEMENTAL_TYPES) | set(WEAPON_EXOTIC_TYPES))
 WEAPON_ESTIMATE_TYPES = frozenset(set(WEAPON_PHYSICAL_TYPES) | set(WEAPON_SIGNATURE_TYPES))
-WEAPON_MODEL_TOTAL_DAMAGE = 120.0
+WEAPON_MODEL_TOTAL_DAMAGE = 230.0
+WEAPON_MODEL_TOTAL_DAMAGE_BY_SIGNATURE_SIZE = {
+    1: 60.0,
+    2: 160.0,
+    3: 230.0,
+    4: 230.0,
+}
 WEAPON_ACTUAL_DAMAGE_MIN_OBSERVATIONS = 4
 WEAPON_ACTUAL_DAMAGE_FULL_WEIGHT_OBSERVATIONS = 24.0
 WEAPON_ACTUAL_DAMAGE_MAX_WEIGHT = 0.25
@@ -50,6 +56,10 @@ WEAPON_ACTUAL_DAMAGE_CLAMP_LOW = 0.50
 WEAPON_ACTUAL_DAMAGE_CLAMP_HIGH = 1.50
 WEAPON_ACTUAL_DAMAGE_UNRELIABLE_IMMUNITY_PERCENT = 90
 WEAPON_ACTUAL_DAMAGE_MIN_EFFECTIVE_RATIO = 0.25
+WEAPON_ELEMENT_MODIFIER_MIN_SAMPLES = 50
+WEAPON_ELEMENT_MODIFIER_SAMPLE_WINDOW = 100
+WEAPON_ELEMENT_MODIFIER_CLAMP_LOW = 0.80
+WEAPON_ELEMENT_MODIFIER_CLAMP_HIGH = 1.25
 P2_SPECIAL_NAME = "P2"
 MAMMONS_WRATH_SIGNATURE = tuple(sorted((
     hgx_data.DAMAGE_TYPE_NAME_TO_ID["cold"],
@@ -885,6 +895,7 @@ class WeaponLearningProfile:
     type_estimates: Dict[int, WeaponDamageEstimate] = field(default_factory=dict)
     target_type_estimates: Dict[str, Dict[int, WeaponDamageEstimate]] = field(default_factory=dict)
     target_damage_observations: Dict[str, Dict[Tuple[int, ...], WeaponObservedDamage]] = field(default_factory=dict)
+    type_modifier_samples: Dict[int, List[float]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -2773,6 +2784,7 @@ class AutoAAScript(ClientScriptBase):
         profile.type_estimates.clear()
         profile.target_type_estimates.clear()
         profile.target_damage_observations.clear()
+        profile.type_modifier_samples.clear()
 
     def _profile_signature_types(self, profile: Optional[WeaponLearningProfile]) -> Set[int]:
         if profile is None:
@@ -2844,7 +2856,7 @@ class AutoAAScript(ClientScriptBase):
         signature = self._profile_signature_for_target(profile, creature_name)
         if not signature:
             return {}
-        return self._model_components_for_signature(signature)
+        return self._profile_model_components_for_signature(profile, signature)
 
     def _profile_signature_for_target(
         self,
@@ -3073,6 +3085,46 @@ class AutoAAScript(ClientScriptBase):
         observed_map = profile.target_damage_observations.setdefault(target_key, {})
         self._apply_observed_damage_map(observed_map, tuple(signature), actual_total, bool(is_critical))
 
+    def _record_profile_type_modifier_observation(
+        self,
+        profile: WeaponLearningProfile,
+        damage_line,
+        signature: Tuple[int, ...],
+        is_critical: bool = False,
+    ):
+        if profile is None or not signature or bool(is_critical):
+            return
+        if not self._profile_is_p2(profile) and tuple(profile.stable_signature) != tuple(signature):
+            return
+
+        static_components = self._model_components_for_signature(signature)
+        if not self._weapon_actual_damage_observation_reliable(damage_line.defender, static_components):
+            return
+
+        combat_profile = self.db._resolve_combat_profile(damage_line.defender)
+        if combat_profile is None:
+            return
+
+        samples_by_type: Dict[int, float] = {}
+        for component in damage_line.components:
+            damage_type = getattr(component, "damage_type", None)
+            if damage_type not in static_components:
+                continue
+            sample = self._estimate_component_base_damage(combat_profile, component)
+            if sample is None or sample <= 0.0:
+                return
+            samples_by_type[int(damage_type)] = float(sample)
+
+        if set(samples_by_type) != set(static_components):
+            return
+
+        max_window = max(int(WEAPON_ELEMENT_MODIFIER_SAMPLE_WINDOW), int(WEAPON_ELEMENT_MODIFIER_MIN_SAMPLES))
+        for damage_type, sample in samples_by_type.items():
+            samples = profile.type_modifier_samples.setdefault(int(damage_type), [])
+            samples.append(float(sample))
+            if len(samples) > max_window:
+                del samples[:-max_window]
+
     def _weapon_actual_damage_observation_reliable(self, creature_name: str, components: Dict[int, float]) -> bool:
         if not components:
             return False
@@ -3122,7 +3174,11 @@ class AutoAAScript(ClientScriptBase):
         blended = (expected_value * (1.0 - actual_weight)) + (bounded_actual * actual_weight)
         return int(round(blended))
 
-    def _model_components_for_types(self, damage_types: Set[int]) -> Dict[int, float]:
+    def _model_components_for_types(
+        self,
+        damage_types: Set[int],
+        total_damage: Optional[float] = None,
+    ) -> Dict[int, float]:
         signature_types = sorted(
             int(damage_type)
             for damage_type in set(damage_types or set())
@@ -3130,17 +3186,80 @@ class AutoAAScript(ClientScriptBase):
         )
         if not signature_types:
             return {}
-        per_type = float(WEAPON_MODEL_TOTAL_DAMAGE) / float(len(signature_types))
+        model_total = float(
+            self._model_total_for_signature_size(len(signature_types))
+            if total_damage is None
+            else total_damage
+        )
+        if model_total <= 0.0:
+            model_total = self._model_total_for_signature_size(len(signature_types))
+        per_type = model_total / float(len(signature_types))
         return {damage_type: per_type for damage_type in signature_types}
 
-    def _model_components_for_signature(self, signature: Tuple[int, ...]) -> Dict[int, float]:
-        return self._model_components_for_types(set(signature or ()))
+    def _model_total_for_signature_size(self, signature_size: int) -> float:
+        size = max(int(signature_size or 0), 1)
+        if size in WEAPON_MODEL_TOTAL_DAMAGE_BY_SIGNATURE_SIZE:
+            return float(WEAPON_MODEL_TOTAL_DAMAGE_BY_SIGNATURE_SIZE[size])
+        return float(WEAPON_MODEL_TOTAL_DAMAGE)
+
+    def _model_components_for_signature(
+        self,
+        signature: Tuple[int, ...],
+        total_damage: Optional[float] = None,
+    ) -> Dict[int, float]:
+        return self._model_components_for_types(set(signature or ()), total_damage)
+
+    def _median_float(self, values: List[float]) -> float:
+        if not values:
+            return 0.0
+        sorted_values = sorted(float(value) for value in values)
+        midpoint = len(sorted_values) // 2
+        if len(sorted_values) % 2:
+            return sorted_values[midpoint]
+        return (sorted_values[midpoint - 1] + sorted_values[midpoint]) / 2.0
+
+    def _profile_element_modifier(
+        self,
+        profile: Optional[WeaponLearningProfile],
+        damage_type: int,
+        baseline_amount: float,
+    ) -> float:
+        if profile is None or baseline_amount <= 0.0:
+            return 1.0
+        samples = list((profile.type_modifier_samples or {}).get(damage_type) or [])
+        if len(samples) < WEAPON_ELEMENT_MODIFIER_MIN_SAMPLES:
+            return 1.0
+        ratio = self._median_float(samples) / float(baseline_amount)
+        return min(
+            max(ratio, float(WEAPON_ELEMENT_MODIFIER_CLAMP_LOW)),
+            float(WEAPON_ELEMENT_MODIFIER_CLAMP_HIGH),
+        )
+
+    def _profile_model_components_for_types(
+        self,
+        profile: Optional[WeaponLearningProfile],
+        damage_types: Set[int],
+    ) -> Dict[int, float]:
+        components = self._model_components_for_types(damage_types)
+        if profile is None:
+            return components
+        return {
+            damage_type: float(base_damage) * self._profile_element_modifier(profile, damage_type, float(base_damage))
+            for damage_type, base_damage in components.items()
+        }
+
+    def _profile_model_components_for_signature(
+        self,
+        profile: Optional[WeaponLearningProfile],
+        signature: Tuple[int, ...],
+    ) -> Dict[int, float]:
+        return self._profile_model_components_for_types(profile, set(signature or ()))
 
     def _profile_component_estimates(self, profile: Optional[WeaponLearningProfile]) -> Dict[int, float]:
         if profile is None:
             return {}
 
-        return self._model_components_for_types(self._profile_known_damage_types(profile))
+        return self._profile_model_components_for_types(profile, self._profile_known_damage_types(profile))
 
     def _is_mammons_tear_target_name(self, creature_name: str) -> bool:
         return _normalize_creature_name_key(creature_name) in MAMMONS_TEAR_TARGETS
@@ -3236,7 +3355,9 @@ class AutoAAScript(ClientScriptBase):
     def _profile_estimate_observations(self, profile: Optional[WeaponLearningProfile]) -> int:
         if profile is None:
             return 0
-        return sum(int(estimate.observations) for estimate in profile.type_estimates.values())
+        type_observations = sum(int(estimate.observations) for estimate in profile.type_estimates.values())
+        modifier_observations = max((len(samples) for samples in profile.type_modifier_samples.values()), default=0)
+        return max(type_observations, modifier_observations)
 
     def _profile_learning_complete(self, profile: Optional[WeaponLearningProfile]) -> bool:
         if profile is None:
@@ -3302,6 +3423,17 @@ class AutoAAScript(ClientScriptBase):
         components = self._profile_component_estimates(profile)
         if components:
             parts.append("Model " + self._format_estimated_components(components))
+        modifier_parts = []
+        static_components = self._model_components_for_types(self._profile_known_damage_types(profile))
+        for damage_type, samples in sorted(profile.type_modifier_samples.items()):
+            if len(samples) < WEAPON_ELEMENT_MODIFIER_MIN_SAMPLES:
+                continue
+            base_amount = static_components.get(damage_type, 0.0)
+            modifier = self._profile_element_modifier(profile, damage_type, base_amount)
+            if abs(modifier - 1.0) >= 0.02:
+                modifier_parts.append(f"{_format_damage_type_label(damage_type)}x{modifier:.2f}")
+        if modifier_parts:
+            parts.append("Mods " + "/".join(modifier_parts))
         ignored_types = self._weapon_ignored_damage_types(profile, components)
         if ignored_types:
             parts.append(f"Ignore {self._format_ignored_damage_types(profile, ignored_types)} rider")
@@ -4006,6 +4138,7 @@ class AutoAAScript(ClientScriptBase):
         profile.observations += 1
         profile.last_seen_at = now
         signature_changed = self._observe_profile_signature(profile, observed_types, target_key)
+        observed_signature = self._damage_signature(observed_types)
         commit_components = not variation_candidate or self._profile_is_p2(profile)
         combat_profile = self.db._resolve_combat_profile(damage_line.defender)
         if commit_components:
@@ -4021,12 +4154,18 @@ class AutoAAScript(ClientScriptBase):
                 if target_key:
                     target_estimates = profile.target_type_estimates.setdefault(target_key, {})
                     self._apply_component_estimate_map(target_estimates, damage_type, int(component.amount), sample)
-            self._record_p2_verification_target(profile, damage_line.defender, self._damage_signature(observed_types))
+            self._record_profile_type_modifier_observation(
+                profile,
+                damage_line,
+                observed_signature,
+                is_critical=is_critical,
+            )
+            self._record_p2_verification_target(profile, damage_line.defender, observed_signature)
             if target_key:
                 self._record_profile_target_actual_damage(
                     profile,
                     target_key,
-                    self._damage_signature(observed_types),
+                    observed_signature,
                     damage_line,
                     is_critical=is_critical,
                 )
@@ -4265,7 +4404,7 @@ class AutoAAScript(ClientScriptBase):
         creature_name: str,
         signature: Tuple[int, ...],
     ) -> Dict[int, float]:
-        return self._model_components_for_signature(signature)
+        return self._profile_model_components_for_signature(profile, signature)
 
     def _predict_p2_signature_components(
         self,
@@ -4278,7 +4417,7 @@ class AutoAAScript(ClientScriptBase):
 
         generic_signature = self._generic_p2_signature_for_target(creature_name)
         if generic_signature:
-            return generic_signature, self._model_components_for_signature(generic_signature)
+            return generic_signature, self._profile_model_components_for_signature(profile, generic_signature)
 
         best_signature: Tuple[int, ...] = ()
         best_components: Dict[int, float] = {}
@@ -4286,7 +4425,7 @@ class AutoAAScript(ClientScriptBase):
         for signature in sorted(profile.signature_counts.keys()):
             if not self._is_p2_signature(signature):
                 continue
-            components = self._model_components_for_signature(signature)
+            components = self._profile_model_components_for_signature(profile, signature)
             if not components:
                 continue
             estimate = self.db.estimate_custom_damage(creature_name, components)
@@ -4543,7 +4682,7 @@ class AutoAAScript(ClientScriptBase):
         for profile in self.weapon_profiles.values():
             if self._profile_learning_complete(profile):
                 ready_count += 1
-            if profile.type_estimates:
+            if profile.type_estimates or profile.type_modifier_samples:
                 estimated_count += 1
             if self._profile_is_p2(profile):
                 adaptive_count += 1

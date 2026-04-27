@@ -1125,8 +1125,8 @@ class ChatEventTests(unittest.TestCase):
         candidates = script._weapon_candidates_for_target("Black Slaad")
         by_key = {candidate.binding.key: candidate for candidate in candidates}
 
-        self.assertEqual(by_key["W1"].expected_damage, 26)
-        self.assertEqual(by_key["W2"].expected_damage, 43)
+        self.assertEqual(by_key["W1"].expected_damage, 59)
+        self.assertEqual(by_key["W2"].expected_damage, 106)
         self.assertEqual(script._choose_best_weapon(candidates).binding.key, "W2")
 
     def test_weapon_selection_actual_damage_only_conservatively_nudges_model(self):
@@ -1166,7 +1166,7 @@ class ChatEventTests(unittest.TestCase):
         candidates = script._weapon_candidates_for_target("Black Slaad")
         by_key = {candidate.binding.key: candidate for candidate in candidates}
 
-        self.assertEqual(by_key["W1"].expected_damage, 26)
+        self.assertEqual(by_key["W1"].expected_damage, 59)
         self.assertLess(by_key["W1"].selection_damage, by_key["W2"].selection_damage)
         self.assertEqual(script._choose_best_weapon(candidates).binding.key, "W2")
 
@@ -1227,6 +1227,124 @@ class ChatEventTests(unittest.TestCase):
         script._record_profile_target_actual_damage(profile, target_key, signature, damage_line)
 
         self.assertEqual(script._profile_target_actual_damage(profile, "Black Slaad", signature), (80, 1))
+
+    def test_weapon_static_baseline_uses_calibrated_signature_size_totals(self):
+        host = FakeHost()
+        script = AutoAAScript(
+            host.client,
+            {
+                "mode": AutoAAScript.MODE_WEAPON_SWAP,
+                "weapon_slot_1": "F1",
+            },
+            host,
+        )
+        script.on_start()
+        acid = hgx_data.DAMAGE_TYPE_NAME_TO_ID["acid"]
+        cold = hgx_data.DAMAGE_TYPE_NAME_TO_ID["cold"]
+        electrical = hgx_data.DAMAGE_TYPE_NAME_TO_ID["electrical"]
+        fire = hgx_data.DAMAGE_TYPE_NAME_TO_ID["fire"]
+        magical = hgx_data.DAMAGE_TYPE_NAME_TO_ID["magical"]
+        positive = hgx_data.DAMAGE_TYPE_NAME_TO_ID["positive"]
+
+        self.assertEqual(script._model_components_for_signature((cold,)), {cold: 60.0})
+        self.assertEqual(
+            {damage_type: round(amount) for damage_type, amount in script._model_components_for_signature((cold, electrical)).items()},
+            {cold: 80, electrical: 80},
+        )
+        self.assertEqual(
+            {damage_type: round(amount) for damage_type, amount in script._model_components_for_signature((cold, electrical, magical)).items()},
+            {cold: 77, electrical: 77, magical: 77},
+        )
+        self.assertEqual(
+            {damage_type: round(amount) for damage_type, amount in script._model_components_for_signature((acid, fire, magical, positive)).items()},
+            {acid: 58, fire: 58, magical: 58, positive: 58},
+        )
+
+    def test_weapon_element_modifier_requires_large_reliable_sample_window(self):
+        host = FakeHost()
+        script = AutoAAScript(
+            host.client,
+            {
+                "mode": AutoAAScript.MODE_WEAPON_SWAP,
+                "weapon_slot_1": "F1",
+            },
+            host,
+        )
+        script.on_start()
+        cold = hgx_data.DAMAGE_TYPE_NAME_TO_ID["cold"]
+        electrical = hgx_data.DAMAGE_TYPE_NAME_TO_ID["electrical"]
+        magical = hgx_data.DAMAGE_TYPE_NAME_TO_ID["magical"]
+        profile = script.weapon_profiles["W1"]
+        profile.stable_signature = (cold, electrical, magical)
+        profile.stable_signature_observations = 2
+
+        profile.type_modifier_samples[cold] = [100.0] * 49
+        components = script._profile_component_estimates(profile)
+        self.assertEqual({round(value) for value in components.values()}, {77})
+
+        profile.type_modifier_samples[cold].append(100.0)
+        components = script._profile_component_estimates(profile)
+
+        self.assertEqual(round(components[cold]), 96)
+        self.assertEqual(round(components[electrical]), 77)
+        self.assertEqual(round(components[magical]), 77)
+
+    def test_weapon_element_modifier_samples_skip_unreliable_targets(self):
+        host = FakeHost()
+        script = AutoAAScript(
+            host.client,
+            {
+                "mode": AutoAAScript.MODE_WEAPON_SWAP,
+                "weapon_slot_1": "F1",
+            },
+            host,
+        )
+        script.on_start()
+        script.db = hgx_data.load_character_database()
+        fire = hgx_data.DAMAGE_TYPE_NAME_TO_ID["fire"]
+        sonic = hgx_data.DAMAGE_TYPE_NAME_TO_ID["sonic"]
+        positive = hgx_data.DAMAGE_TYPE_NAME_TO_ID["positive"]
+        signature = (fire, sonic, positive)
+        profile = script.weapon_profiles["W1"]
+        profile.stable_signature = signature
+        profile.stable_signature_observations = 2
+        damage_line = combat.parse_damage_line(
+            "Starcore-StormReaper [2.0] damages Black Slaad: "
+            "117 (66 Physical 30 Fire 21 Positive Energy 0 Sonic)"
+        )
+
+        script._record_profile_type_modifier_observation(profile, damage_line, signature)
+
+        self.assertEqual(profile.type_modifier_samples, {})
+
+    def test_weapon_element_modifier_samples_record_reliable_targets(self):
+        host = FakeHost()
+        script = AutoAAScript(
+            host.client,
+            {
+                "mode": AutoAAScript.MODE_WEAPON_SWAP,
+                "weapon_slot_1": "F1",
+            },
+            host,
+        )
+        script.on_start()
+        script.db = hgx_data.load_character_database()
+        cold = hgx_data.DAMAGE_TYPE_NAME_TO_ID["cold"]
+        electrical = hgx_data.DAMAGE_TYPE_NAME_TO_ID["electrical"]
+        magical = hgx_data.DAMAGE_TYPE_NAME_TO_ID["magical"]
+        signature = (cold, electrical, magical)
+        profile = script.weapon_profiles["W1"]
+        profile.stable_signature = signature
+        profile.stable_signature_observations = 2
+        damage_line = combat.parse_damage_line(
+            "Starcore-StormReaper [2.0] damages Black Slaad: "
+            "107 (27 Physical 25 Cold 35 Electrical 20 Magical)"
+        )
+
+        script._record_profile_type_modifier_observation(profile, damage_line, signature)
+
+        self.assertEqual(set(profile.type_modifier_samples), {cold, electrical, magical})
+        self.assertEqual({damage_type: len(samples) for damage_type, samples in profile.type_modifier_samples.items()}, {cold: 1, electrical: 1, magical: 1})
 
     def test_shifter_observed_healing_damage_uses_least_healing_instead_of_unarmed(self):
         host = FakeHost()
