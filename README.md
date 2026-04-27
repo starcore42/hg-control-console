@@ -4,6 +4,9 @@ HG Control Console (HGCC) is a Windows control and automation toolkit for **Neve
 
 The project is aimed at multi-client play, combat automation, damage analysis, and Higher Ground quality-of-life workflows. Each injected client exposes a named pipe that HGCC uses for quickbar activation, chat sending and capture, overlays, player identity, and quickbar state.
 
+> [!WARNING]
+> Do not run HGX at the same time as HGCC. Both tools hook or control the NWN client, and running them together can cause client crashes.
+
 ![HG Control Console](docs/assets/simkeys-control-center.png)
 
 ## Features
