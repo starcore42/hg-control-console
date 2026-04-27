@@ -48,6 +48,8 @@ WEAPON_ACTUAL_DAMAGE_FULL_WEIGHT_OBSERVATIONS = 24.0
 WEAPON_ACTUAL_DAMAGE_MAX_WEIGHT = 0.25
 WEAPON_ACTUAL_DAMAGE_CLAMP_LOW = 0.50
 WEAPON_ACTUAL_DAMAGE_CLAMP_HIGH = 1.50
+WEAPON_ACTUAL_DAMAGE_UNRELIABLE_IMMUNITY_PERCENT = 90
+WEAPON_ACTUAL_DAMAGE_MIN_EFFECTIVE_RATIO = 0.25
 P2_SPECIAL_NAME = "P2"
 MAMMONS_WRATH_SIGNATURE = tuple(sorted((
     hgx_data.DAMAGE_TYPE_NAME_TO_ID["cold"],
@@ -3046,13 +3048,21 @@ class AutoAAScript(ClientScriptBase):
             return
 
         ignored_types = set(self._weapon_ignored_damage_types(profile))
-        relevant_types = set(signature)
+        model_components = self._model_components_for_signature(signature)
+        if ignored_types:
+            model_components = {
+                damage_type: base_damage
+                for damage_type, base_damage in model_components.items()
+                if damage_type not in ignored_types
+            }
+        relevant_types = set(model_components)
+        if not self._weapon_actual_damage_observation_reliable(damage_line.defender, model_components):
+            return
+
         actual_total = 0
         saw_relevant = False
         for component in damage_line.components:
             damage_type = getattr(component, "damage_type", None)
-            if damage_type in ignored_types:
-                continue
             if damage_type in relevant_types:
                 actual_total += int(component.amount)
                 saw_relevant = True
@@ -3062,6 +3072,31 @@ class AutoAAScript(ClientScriptBase):
 
         observed_map = profile.target_damage_observations.setdefault(target_key, {})
         self._apply_observed_damage_map(observed_map, tuple(signature), actual_total, bool(is_critical))
+
+    def _weapon_actual_damage_observation_reliable(self, creature_name: str, components: Dict[int, float]) -> bool:
+        if not components:
+            return False
+
+        combat_profile = self.db._resolve_combat_profile(creature_name)
+        if combat_profile is None:
+            return False
+
+        for damage_type, base_damage in components.items():
+            if damage_type < 0 or damage_type >= len(combat_profile.healing):
+                return False
+            if int(combat_profile.healing[damage_type] or 0) != 0:
+                return False
+            if int(combat_profile.immunity[damage_type] or 0) >= WEAPON_ACTUAL_DAMAGE_UNRELIABLE_IMMUNITY_PERCENT:
+                return False
+
+            expected_damage = self._expected_component_damage_for_target(combat_profile, damage_type, float(base_damage))
+            if expected_damage <= 0:
+                return False
+            retained_ratio = float(expected_damage) / float(base_damage)
+            if retained_ratio < WEAPON_ACTUAL_DAMAGE_MIN_EFFECTIVE_RATIO:
+                return False
+
+        return True
 
     def _selection_damage_score(self, expected_damage: int, actual_damage: Optional[int], actual_observations: int) -> int:
         if actual_damage is None or actual_observations < WEAPON_ACTUAL_DAMAGE_MIN_OBSERVATIONS:

@@ -1170,6 +1170,64 @@ class ChatEventTests(unittest.TestCase):
         self.assertLess(by_key["W1"].selection_damage, by_key["W2"].selection_damage)
         self.assertEqual(script._choose_best_weapon(candidates).binding.key, "W2")
 
+    def test_weapon_actual_damage_skips_unreliable_resistance_targets(self):
+        host = FakeHost()
+        script = AutoAAScript(
+            host.client,
+            {
+                "mode": AutoAAScript.MODE_WEAPON_SWAP,
+                "weapon_slot_1": "F1",
+            },
+            host,
+        )
+        script.on_start()
+        script.db = hgx_data.load_character_database()
+        fire = hgx_data.DAMAGE_TYPE_NAME_TO_ID["fire"]
+        sonic = hgx_data.DAMAGE_TYPE_NAME_TO_ID["sonic"]
+        positive = hgx_data.DAMAGE_TYPE_NAME_TO_ID["positive"]
+        signature = (fire, sonic, positive)
+        profile = script.weapon_profiles["W1"]
+        profile.stable_signature = signature
+        profile.stable_signature_observations = 2
+        target_key = script._profile_target_key("Black Slaad")
+        damage_line = combat.parse_damage_line(
+            "Starcore-StormReaper [2.0] damages Black Slaad: "
+            "117 (66 Physical 30 Fire 21 Positive Energy 0 Sonic)"
+        )
+
+        script._record_profile_target_actual_damage(profile, target_key, signature, damage_line)
+
+        self.assertEqual(script._profile_target_actual_damage(profile, "Black Slaad", signature), (None, 0))
+
+    def test_weapon_actual_damage_records_reliable_target_samples(self):
+        host = FakeHost()
+        script = AutoAAScript(
+            host.client,
+            {
+                "mode": AutoAAScript.MODE_WEAPON_SWAP,
+                "weapon_slot_1": "F1",
+            },
+            host,
+        )
+        script.on_start()
+        script.db = hgx_data.load_character_database()
+        cold = hgx_data.DAMAGE_TYPE_NAME_TO_ID["cold"]
+        electrical = hgx_data.DAMAGE_TYPE_NAME_TO_ID["electrical"]
+        magical = hgx_data.DAMAGE_TYPE_NAME_TO_ID["magical"]
+        signature = (cold, electrical, magical)
+        profile = script.weapon_profiles["W1"]
+        profile.stable_signature = signature
+        profile.stable_signature_observations = 2
+        target_key = script._profile_target_key("Black Slaad")
+        damage_line = combat.parse_damage_line(
+            "Starcore-StormReaper [2.0] damages Black Slaad: "
+            "107 (27 Physical 25 Cold 35 Electrical 20 Magical)"
+        )
+
+        script._record_profile_target_actual_damage(profile, target_key, signature, damage_line)
+
+        self.assertEqual(script._profile_target_actual_damage(profile, "Black Slaad", signature), (80, 1))
+
     def test_shifter_observed_healing_damage_uses_least_healing_instead_of_unarmed(self):
         host = FakeHost()
         script = AutoAAScript(
