@@ -1197,6 +1197,80 @@ class ChatEventTests(unittest.TestCase):
         self.assertEqual(by_key["W2"].expected_damage, 106)
         self.assertEqual(script._choose_best_weapon(candidates).binding.key, "W2")
 
+    def test_weapon_learning_ignores_self_spell_damage_without_attack_result(self):
+        host = FakeHost()
+        script = AutoAAScript(
+            host.client,
+            {
+                "mode": AutoAAScript.MODE_WEAPON_SWAP,
+                "weapon_slot_1": "F1",
+                "current_weapon": "W1",
+            },
+            host,
+        )
+        script.on_start()
+        script.db = hgx_data.load_character_database()
+        fire = hgx_data.DAMAGE_TYPE_NAME_TO_ID["fire"]
+        sonic = hgx_data.DAMAGE_TYPE_NAME_TO_ID["sonic"]
+        positive = hgx_data.DAMAGE_TYPE_NAME_TO_ID["positive"]
+        electrical = hgx_data.DAMAGE_TYPE_NAME_TO_ID["electrical"]
+        profile = script.weapon_profiles["W1"]
+        profile.stable_signature = (fire, sonic, positive)
+        profile.stable_signature_observations = 8
+
+        script.on_chat_event(parse_chat_line_event(1, "Starcore-StormReaper [2.0] casts Epic Spell: Hellball"))
+        for sequence in range(2, 14):
+            script.on_chat_event(
+                parse_chat_line_event(
+                    sequence,
+                    "Starcore-StormReaper [2.0] damages Hamatula: 600 (600 Electrical)",
+                )
+            )
+
+        self.assertEqual(profile.stable_signature, (fire, sonic, positive))
+        self.assertEqual(profile.mismatch_streak, 0)
+        self.assertNotIn((electrical,), profile.signature_counts)
+
+    def test_weapon_learning_accepts_attack_damage_after_self_spell(self):
+        host = FakeHost()
+        script = AutoAAScript(
+            host.client,
+            {
+                "mode": AutoAAScript.MODE_WEAPON_SWAP,
+                "weapon_slot_1": "F1",
+                "current_weapon": "W1",
+            },
+            host,
+        )
+        script.on_start()
+        script.db = hgx_data.load_character_database()
+        fire = hgx_data.DAMAGE_TYPE_NAME_TO_ID["fire"]
+        sonic = hgx_data.DAMAGE_TYPE_NAME_TO_ID["sonic"]
+        positive = hgx_data.DAMAGE_TYPE_NAME_TO_ID["positive"]
+        profile = script.weapon_profiles["W1"]
+
+        script.on_chat_event(parse_chat_line_event(1, "Starcore-StormReaper [2.0] casts Epic Spell: Hellball"))
+        script.on_chat_event(
+            parse_chat_line_event(2, "Starcore-StormReaper [2.0] attacks Hamatula : *hit* : (16 + 108 = 124)")
+        )
+        script.on_chat_event(
+            parse_chat_line_event(
+                3,
+                "Starcore-StormReaper [2.0] damages Hamatula: 119 (68 Physical 0 Fire 20 Positive Energy 31 Sonic)",
+            )
+        )
+        script.on_chat_event(
+            parse_chat_line_event(4, "Starcore-StormReaper [2.0] attacks Hamatula : *hit* : (4 + 103 = 107)")
+        )
+        script.on_chat_event(
+            parse_chat_line_event(
+                5,
+                "Starcore-StormReaper [2.0] damages Hamatula: 138 (72 Physical 0 Fire 20 Positive Energy 46 Sonic)",
+            )
+        )
+
+        self.assertEqual(profile.stable_signature, (fire, sonic, positive))
+
     def test_weapon_selection_actual_damage_only_conservatively_nudges_model(self):
         host = FakeHost()
         script = AutoAAScript(

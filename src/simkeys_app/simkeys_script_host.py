@@ -61,6 +61,7 @@ WEAPON_ELEMENT_MODIFIER_MIN_SAMPLES = 50
 WEAPON_ELEMENT_MODIFIER_SAMPLE_WINDOW = 100
 WEAPON_ELEMENT_MODIFIER_CLAMP_LOW = 0.80
 WEAPON_ELEMENT_MODIFIER_CLAMP_HIGH = 1.25
+WEAPON_RECENT_SELF_SPELL_DAMAGE_IGNORE_SECONDS = 6.0
 P2_SPECIAL_NAME = "P2"
 MAMMONS_WRATH_SIGNATURE = tuple(sorted((
     hgx_data.DAMAGE_TYPE_NAME_TO_ID["cold"],
@@ -1604,6 +1605,9 @@ class AutoAAScript(ClientScriptBase):
         self.weapon_last_ignored_attack_actor = ""
         self.weapon_last_ignored_damage_actor = ""
         self.weapon_pending_attack_results: List[PendingWeaponAttackResult] = []
+        self.weapon_recent_self_spell_cast_at = 0.0
+        self.weapon_recent_self_spell_sequence = 0
+        self.weapon_recent_self_spell_name = ""
         self.shifter_shift_choice = WEAPON_SLOT_NONE
         self.shifter_shift_page = 0
         self.shifter_shift_slot = 0
@@ -1674,6 +1678,9 @@ class AutoAAScript(ClientScriptBase):
         self.weapon_last_ignored_attack_actor = ""
         self.weapon_last_ignored_damage_actor = ""
         self.weapon_pending_attack_results = []
+        self.weapon_recent_self_spell_cast_at = 0.0
+        self.weapon_recent_self_spell_sequence = 0
+        self.weapon_recent_self_spell_name = ""
         self._reset_shifter_runtime(clear_observed=True)
 
         if self._is_weapon_mode():
@@ -1739,6 +1746,9 @@ class AutoAAScript(ClientScriptBase):
         self.weapon_equipped_probe_error_logged = False
         self.weapon_unarmed_observations = 0
         self.weapon_pending_attack_results = []
+        self.weapon_recent_self_spell_cast_at = 0.0
+        self.weapon_recent_self_spell_sequence = 0
+        self.weapon_recent_self_spell_name = ""
         self._reset_shifter_runtime(clear_observed=True)
         self.canister_stop.set()
         self.host.set_shifter_recovery_active(False)
@@ -1761,6 +1771,7 @@ class AutoAAScript(ClientScriptBase):
             "kill",
             "player_hide",
             "shifter_state",
+            "spell_cast",
             "target_blind",
             "weapon_feedback",
         )
@@ -1779,6 +1790,8 @@ class AutoAAScript(ClientScriptBase):
         if self._is_weapon_mode():
             if self._is_shifter_weapon_mode():
                 self._observe_shifter_event(event)
+            if event.has_kind("spell_cast"):
+                self._observe_weapon_spell_cast_event(event)
             if event.weapon_feedback:
                 self._handle_weapon_swap_feedback(event.weapon_feedback)
             if event.damage is not None:
@@ -4216,6 +4229,38 @@ class AutoAAScript(ClientScriptBase):
             return
         self._observe_weapon_damage_event(damage_line, counted_candidate=True)
 
+    def _observe_weapon_spell_cast_event(self, event: ChatLineEvent):
+        character_name = self._character_name()
+        character_key = hgx_combat.normalize_actor_name(character_name).lower() if character_name else ""
+        caster_key = hgx_combat.normalize_actor_name(event.spell_caster).lower() if event.spell_caster else ""
+        if not character_key or caster_key != character_key:
+            return
+        self.weapon_recent_self_spell_cast_at = time.monotonic()
+        self.weapon_recent_self_spell_sequence = int(event.sequence or 0)
+        self.weapon_recent_self_spell_name = str(event.spell_name or "").strip()
+
+    def _recent_self_spell_damage_is_active(self, now: float) -> bool:
+        if not self.weapon_recent_self_spell_cast_at:
+            return False
+        age = now - float(self.weapon_recent_self_spell_cast_at or 0.0)
+        return 0.0 <= age <= WEAPON_RECENT_SELF_SPELL_DAMAGE_IGNORE_SECONDS
+
+    def _should_ignore_weapon_damage_after_self_spell(
+        self,
+        damage_line,
+        attack_result: Optional[PendingWeaponAttackResult],
+        now: float,
+    ) -> bool:
+        if attack_result is not None:
+            return False
+        if not self._recent_self_spell_damage_is_active(now):
+            return False
+
+        spell_name = self.weapon_recent_self_spell_name or "spell"
+        self.set_status(f"{damage_line.defender}: ignoring {spell_name} damage for weapon learning")
+        self.host.notify_state_changed()
+        return True
+
     def _observe_weapon_damage_event(self, damage_line, counted_candidate: bool = False):
         if counted_candidate:
             self.weapon_damage_parse_miss_count = max(self.weapon_damage_parse_miss_count - 1, 0)
@@ -4230,6 +4275,9 @@ class AutoAAScript(ClientScriptBase):
         attack_result = self._consume_pending_weapon_attack_result(damage_line.defender)
 
         now = time.monotonic()
+        if self._should_ignore_weapon_damage_after_self_spell(damage_line, attack_result, now):
+            return
+
         observed_types = self._observed_weapon_damage_types(damage_line)
         profile = None
         if not observed_types and self._damage_line_is_physical_only(damage_line):
