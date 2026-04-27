@@ -2740,9 +2740,12 @@ class AutoAAScript(ClientScriptBase):
         signature_types = {int(damage_type) for damage_type in signature if isinstance(damage_type, int)}
         if len(signature_types) != 3:
             return False
-        elemental_count = len(signature_types.intersection(WEAPON_ELEMENTAL_TYPES))
-        exotic_count = len(signature_types.intersection(WEAPON_EXOTIC_TYPES))
-        return elemental_count == 2 and exotic_count == 1
+        if not signature_types.issubset(WEAPON_SIGNATURE_TYPES):
+            return False
+        # Live P2 weapon rolls include both 2 elemental + 1 exotic and
+        # 1 elemental + 2 exotic mixes. The slot is only marked P2 after it
+        # produces more than one distinct three-type signature.
+        return bool(signature_types.intersection(WEAPON_ELEMENTAL_TYPES))
 
     def _profile_is_p2(self, profile: Optional[WeaponLearningProfile]) -> bool:
         return profile is not None and str(profile.dynamic_kind or "").strip() == P2_SPECIAL_NAME
@@ -3510,6 +3513,16 @@ class AutoAAScript(ClientScriptBase):
 
     def _pending_weapon_retry_seconds(self) -> float:
         return max(self._weapon_swap_cooldown_seconds() * 2.0, 12.0)
+
+    def _pending_weapon_stale_seconds(self) -> float:
+        return max(self._pending_weapon_retry_seconds(), self._weapon_swap_cooldown_seconds() * 2.0)
+
+    def _pending_weapon_is_stale(self, now: Optional[float] = None) -> bool:
+        if not self.pending_weapon_key or self.pending_weapon_requested_at <= 0.0:
+            return False
+        if now is None:
+            now = time.monotonic()
+        return now >= (self.pending_weapon_requested_at + self._pending_weapon_stale_seconds())
 
     def _retry_pending_weapon(self, target_name: str, reason: str) -> bool:
         if not self.pending_weapon_key:
@@ -4360,9 +4373,11 @@ class AutoAAScript(ClientScriptBase):
         target_name = damage_line.defender
         healing_text = ", ".join(_format_damage_type_label(value) for value in healing_types)
         if self.pending_weapon_key:
-            self.set_status(f"{target_name}: healing observed ({healing_text}); awaiting {self._pending_weapon_display()}")
-            self.host.notify_state_changed()
-            return False
+            if not self._pending_weapon_is_stale():
+                self.set_status(f"{target_name}: healing observed ({healing_text}); awaiting {self._pending_weapon_display()}")
+                self.host.notify_state_changed()
+                return False
+            self._cancel_pending_weapon(f"stale pending blocked healing escape ({healing_text})")
 
         unsafe_key = ""
         if profile is not None and profile.binding.key in self.weapon_profiles:
@@ -5202,14 +5217,23 @@ class AutoAAScript(ClientScriptBase):
             if retry_due:
                 equipped_keys = self._query_equipped_binding_keys(force=True)
                 equipped_key = equipped_keys[0] if len(equipped_keys) == 1 else ""
-                retry_safe = not equipped_key or equipped_key == self.current_weapon_key
-                if retry_safe and self._retry_pending_weapon(
-                    attack.defender,
-                    "attack loop observed stale pending swap with no confirming damage",
-                ):
-                    return
-            self.set_status(f"{attack.defender}: awaiting {self._pending_weapon_display()} damage")
-            return
+                if equipped_key and equipped_key != self.pending_weapon_key and equipped_key in self.weapon_profiles:
+                    self._cancel_pending_weapon(
+                        f"equipped mask reports {self._binding_display(equipped_key)} after stale pending"
+                    )
+                    self._set_current_weapon_from_equipped_key(equipped_key, "equipped quickbar mask")
+                else:
+                    retry_safe = not equipped_key or equipped_key == self.current_weapon_key
+                    if retry_safe and self._retry_pending_weapon(
+                        attack.defender,
+                        "attack loop observed stale pending swap with no confirming damage",
+                    ):
+                        return
+                    if self.pending_weapon_key and self._pending_weapon_is_stale(now):
+                        self._cancel_pending_weapon("stale pending swap had no confirming damage")
+            if self.pending_weapon_key:
+                self.set_status(f"{attack.defender}: awaiting {self._pending_weapon_display()} damage")
+                return
 
         self._reconcile_current_weapon_from_equipped_mask()
 

@@ -1488,6 +1488,101 @@ class ChatEventTests(unittest.TestCase):
         self.assertEqual(set(profile.type_modifier_samples), {cold, electrical, magical})
         self.assertEqual({damage_type: len(samples) for damage_type, samples in profile.type_modifier_samples.items()}, {cold: 1, electrical: 1, magical: 1})
 
+    def test_weapon_p2_signature_accepts_one_element_two_exotic_rolls(self):
+        host = FakeHost()
+        script = AutoAAScript(
+            host.client,
+            {
+                "mode": AutoAAScript.MODE_WEAPON_SWAP,
+                "weapon_slot_1": "F1",
+            },
+            host,
+        )
+        script.on_start()
+        cold = hgx_data.DAMAGE_TYPE_NAME_TO_ID["cold"]
+        divine = hgx_data.DAMAGE_TYPE_NAME_TO_ID["divine"]
+        sonic = hgx_data.DAMAGE_TYPE_NAME_TO_ID["sonic"]
+
+        self.assertTrue(script._is_p2_signature(tuple(sorted((cold, divine, sonic)))))
+
+    def test_weapon_dynamic_p2_escapes_healing_after_mixed_roll(self):
+        host = FakeHost()
+        script = AutoAAScript(
+            host.client,
+            {
+                "mode": AutoAAScript.MODE_WEAPON_SWAP,
+                "weapon_slot_1": "F1",
+                "weapon_slot_2": "F2",
+                "current_weapon": "W1",
+            },
+            host,
+        )
+        script.on_start()
+        script.db = hgx_data.load_character_database()
+        acid = hgx_data.DAMAGE_TYPE_NAME_TO_ID["acid"]
+        cold = hgx_data.DAMAGE_TYPE_NAME_TO_ID["cold"]
+        electrical = hgx_data.DAMAGE_TYPE_NAME_TO_ID["electrical"]
+        fire = hgx_data.DAMAGE_TYPE_NAME_TO_ID["fire"]
+        negative = hgx_data.DAMAGE_TYPE_NAME_TO_ID["negative"]
+        positive = hgx_data.DAMAGE_TYPE_NAME_TO_ID["positive"]
+        sonic = hgx_data.DAMAGE_TYPE_NAME_TO_ID["sonic"]
+        divine = hgx_data.DAMAGE_TYPE_NAME_TO_ID["divine"]
+
+        p2_profile = script.weapon_profiles["W1"]
+        first_roll = tuple(sorted((cold, divine, sonic)))
+        p2_profile.stable_signature = first_roll
+        p2_profile.stable_signature_observations = 2
+        p2_profile.signature_counts[first_roll] = 2
+
+        safe_profile = script.weapon_profiles["W2"]
+        safe_profile.stable_signature = tuple(sorted((fire, sonic, positive)))
+        safe_profile.stable_signature_observations = 2
+
+        damage_line = combat.parse_damage_line(
+            "Starcore-StormReaper [2.0] damages Elite Cornugon Taskmaster: "
+            "180 (78 Physical 25 Acid 54 Electrical 23 Negative Energy)"
+        )
+        script._observe_weapon_damage_event(damage_line, counted_candidate=True)
+
+        self.assertEqual(p2_profile.dynamic_kind, "P2")
+        self.assertEqual(script.pending_weapon_key, "W2")
+        self.assertEqual(host.slots[-1], (0, 2))
+        self.assertIn("escape healing", script.status_text)
+
+    def test_weapon_healing_escape_cancels_stale_pending_swap(self):
+        host = FakeHost()
+        script = AutoAAScript(
+            host.client,
+            {
+                "mode": AutoAAScript.MODE_WEAPON_SWAP,
+                "weapon_slot_1": "F1",
+                "weapon_slot_2": "F2",
+                "current_weapon": "W1",
+            },
+            host,
+        )
+        script.on_start()
+        script.db = hgx_data.load_character_database()
+        electrical = hgx_data.DAMAGE_TYPE_NAME_TO_ID["electrical"]
+        fire = hgx_data.DAMAGE_TYPE_NAME_TO_ID["fire"]
+
+        script.weapon_profiles["W1"].stable_signature = (electrical,)
+        script.weapon_profiles["W1"].stable_signature_observations = 2
+        script.weapon_profiles["W2"].stable_signature = (fire,)
+        script.weapon_profiles["W2"].stable_signature_observations = 2
+        script.pending_weapon_key = "W2"
+        script.pending_weapon_requested_at = time.monotonic() - 60.0
+        script.pending_weapon_retry_count = script.WEAPON_PENDING_MAX_RETRIES
+
+        damage_line = combat.parse_damage_line(
+            "Starcore-StormReaper [2.0] damages Elite Cornugon Taskmaster: "
+            "120 (70 Physical 50 Electrical)"
+        )
+
+        self.assertTrue(script._shift_away_from_observed_healing_damage(script.weapon_profiles["W1"], damage_line))
+        self.assertEqual(script.pending_weapon_key, "W2")
+        self.assertEqual(host.slots[-1], (0, 2))
+
     def test_shifter_observed_healing_damage_uses_least_healing_instead_of_unarmed(self):
         host = FakeHost()
         script = AutoAAScript(
