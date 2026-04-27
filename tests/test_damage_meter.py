@@ -28,26 +28,13 @@ class DamageMeterTests(unittest.TestCase):
       <damage type="Fire" immunity="0" resistance="0" />
     </damageImmunities>
   </creature>
-  <creature name="Swarm Master">
-    <damageImmunities>
-      <damage type="Fire" immunity="0" resistance="0" />
-    </damageImmunities>
-  </creature>
-  <creature name="Greater Swarm Master">
-    <damageImmunities>
-      <damage type="Fire" immunity="0" resistance="0" />
-    </damageImmunities>
-  </creature>
-  <creature name="Superior Swarm Master">
-    <damageImmunities>
-      <damage type="Fire" immunity="0" resistance="0" />
-    </damageImmunities>
-  </creature>
-  <creature name="Elite Swarm Master">
-    <damageImmunities>
-      <damage type="Fire" immunity="0" resistance="0" />
-    </damageImmunities>
-  </creature>
+  <creature name="Swarm Master" base="Advespa" type="Greater" />
+  <creature name="Superior Swarm Master" base="Advespa" type="Superior" />
+  <creature name="Elite Swarm Master" base="Advespa" type="Elite" />
+  <creature name="Mummy" />
+  <creature name="Greater Mummy" />
+  <creature name="Superior Mummy" />
+  <creature name="Elite Mummy" />
   <creature name="Raja">
     <damageImmunities>
       <damage type="Fire" immunity="0" resistance="0" />
@@ -169,7 +156,6 @@ class DamageMeterTests(unittest.TestCase):
                     {"time": 100.0, "pid": 1, "text": "Alice [1.0] damages Acid Blob : 100 (10 acid 60 fire 30 cold)"},
                     {"time": 100.1, "pid": 1, "text": "Alice [1.0] killed Advespa"},
                     {"time": 100.8, "pid": 1, "text": "Bob [1.0] killed Swarm Master"},
-                    {"time": 100.9, "pid": 1, "text": "Bob [1.0] killed Greater Swarm Master"},
                     {"time": 101.0, "pid": 1, "text": "Bob [1.0] killed Superior Swarm Master"},
                     {"time": 101.1, "pid": 2, "text": "Bob [1.0] killed Superior Swarm Master"},
                     {"time": 102.0, "pid": 1, "text": "Bob [1.0] killed Elite Swarm Master"},
@@ -180,23 +166,23 @@ class DamageMeterTests(unittest.TestCase):
                 character_db=db,
             )
 
-        self.assertEqual(summary.enemy_kills_counted, 5)
+        self.assertEqual(summary.enemy_kills_counted, 4)
         self.assertEqual(summary.merged_kill_observations, 1)
-        self.assertEqual(summary.enemy_kills["advespa"].variants, {"Advespa": 1})
-        swarm = summary.enemy_kills["swarm master"]
-        self.assertEqual(swarm.total, 4)
+        self.assertNotIn("swarm master", summary.enemy_kills)
+        advespa = summary.enemy_kills["advespa"]
+        self.assertEqual(advespa.total, 4)
         self.assertEqual(
-            swarm.variants,
+            advespa.variants,
             {
+                "Advespa": 1,
                 "Swarm Master": 1,
-                "Greater Swarm Master": 1,
                 "Superior Swarm Master": 1,
                 "Elite Swarm Master": 1,
             },
         )
         self.assertEqual(
-            [variant_name for variant_name, _count in swarm.sorted_variants()],
-            ["Swarm Master", "Greater Swarm Master", "Superior Swarm Master", "Elite Swarm Master"],
+            [variant_name for variant_name, _count in advespa.sorted_variants()],
+            ["Advespa", "Swarm Master", "Superior Swarm Master", "Elite Swarm Master"],
         )
         self.assertEqual(summary.actors["Alice [1.0]"].damage_by_type, {"Fire": 60, "Cold": 30})
         self.assertEqual(summary.actors["Alice [1.0]"].healing_by_type, {"Acid": 60})
@@ -207,14 +193,41 @@ class DamageMeterTests(unittest.TestCase):
         text = meter.format_summary_text(summary)
         self.assertIn("Party Damage Breakdown", text)
         self.assertIn("Enemy Counts", text)
-        self.assertIn("Tier totals: Standard 2, Greater 1, Superior 1, Elite 1", text)
-        self.assertIn("Swarm Master: 4", text)
-        self.assertNotIn("Greater Swarm Master: 1\n  Greater Swarm Master: 1", text)
-        self.assertIn("Advespa: 1\n  Advespa: 1\n\nSwarm Master: 4", text)
+        self.assertIn("Tier totals: Standard 1, Greater 1, Superior 1, Elite 1", text)
+        self.assertIn("Advespa: 4", text)
+        self.assertIn("  Swarm Master: 1", text)
+        self.assertNotIn("Swarm Master: 4", text)
         self.assertIn("Party Deaths", text)
         self.assertIn("Alice [1.0]:", text)
         self.assertIn("\n\n2. Bob [1.0] to Raja", text)
         self.assertIn("Death Recaps\n" + meter.SECTION_BREAK, text)
+
+    def test_enemy_counts_fall_back_to_paragon_prefixes_without_base_metadata(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = self.make_db(tmpdir)
+            summary = meter.analyze_chat_records(
+                [
+                    {"time": 100.0, "pid": 1, "text": "Bob [1.0] killed Mummy"},
+                    {"time": 100.1, "pid": 1, "text": "Bob [1.0] killed Greater Mummy"},
+                    {"time": 100.2, "pid": 1, "text": "Bob [1.0] killed Superior Mummy"},
+                    {"time": 100.3, "pid": 2, "text": "Bob [1.0] killed Superior Mummy"},
+                    {"time": 101.0, "pid": 1, "text": "Bob [1.0] killed Elite Mummy"},
+                ],
+                character_db=db,
+            )
+
+        self.assertEqual(summary.enemy_kills_counted, 4)
+        self.assertEqual(summary.merged_kill_observations, 1)
+        mummy = summary.enemy_kills["mummy"]
+        self.assertEqual(mummy.total, 4)
+        self.assertEqual(
+            [variant_name for variant_name, _count in mummy.sorted_variants()],
+            ["Mummy", "Greater Mummy", "Superior Mummy", "Elite Mummy"],
+        )
+
+        text = meter.format_summary_text(summary)
+        self.assertIn("Tier totals: Standard 1, Greater 1, Superior 1, Elite 1", text)
+        self.assertIn("Mummy: 4", text)
 
     def test_death_recap_tracks_incoming_damage_saves_and_killer_casts(self):
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -34,6 +34,7 @@ PROGRESS_EMIT_INTERVAL = 1000
 PARAGON_TIER_PREFIXES = ("Greater", "Superior", "Elite")
 PARAGON_PREFIXES = (*PARAGON_TIER_PREFIXES, "Paragon")
 PARAGON_TIER_LABELS = ("Standard", "Greater", "Superior", "Elite")
+PARAGON_TIER_BY_CHARACTER_TYPE = {1: 1, 2: 2, 3: 3}
 SECTION_BREAK = "-" * 74
 SPELL_CAST_LINE_RE = re.compile(r"^(?P<caster>.+?)\s+casts\s+(?P<spell>.+?)\s*$", re.IGNORECASE)
 SAVE_LINE_RE = re.compile(
@@ -120,11 +121,12 @@ class EnemyKillStats:
     base_name: str
     total: int = 0
     variants: Dict[str, int] = field(default_factory=dict)
+    variant_tiers: Dict[str, int] = field(default_factory=dict)
 
     def sorted_variants(self) -> List[Tuple[str, int]]:
         return sorted(
             self.variants.items(),
-            key=lambda item: (_enemy_variant_sort_key(item[0], self.base_name), item[0].casefold()),
+            key=lambda item: (_enemy_variant_sort_key(item[0], self.base_name, self.variant_tiers), item[0].casefold()),
         )
 
 
@@ -1006,7 +1008,7 @@ def analyze_chat_records(
         victim = cluster.victim
         if not _is_enemy(victim, db):
             continue
-        _add_enemy_kill(summary, victim)
+        _add_enemy_kill(summary, victim, db)
 
     death_clusters = _merge_death_observations(death_observations)
     clusters = _merge_damage_observations(observations, progress_callback=progress_callback)
@@ -1318,8 +1320,8 @@ def _parse_spell_cast_line(text: str) -> Optional[Tuple[str, str]]:
     return caster, spell
 
 
-def _add_enemy_kill(summary: DamageMeterSummary, enemy_name: str):
-    base_name, variant_name = _enemy_base_and_variant(enemy_name)
+def _add_enemy_kill(summary: DamageMeterSummary, enemy_name: str, db=None):
+    base_name, variant_name, tier_index = _enemy_base_variant_and_tier(enemy_name, db)
     key = base_name.casefold()
     stats = summary.enemy_kills.get(key)
     if stats is None:
@@ -1327,6 +1329,7 @@ def _add_enemy_kill(summary: DamageMeterSummary, enemy_name: str):
         summary.enemy_kills[key] = stats
     stats.total += 1
     stats.variants[variant_name] = int(stats.variants.get(variant_name, 0)) + 1
+    stats.variant_tiers[variant_name] = tier_index
     summary.enemy_kills_counted += 1
 
 
@@ -1362,8 +1365,51 @@ def _enemy_base_and_variant(enemy_name: str) -> Tuple[str, str]:
     return base or variant, variant or "Unknown"
 
 
-def _enemy_variant_sort_key(variant_name: str, base_name: str) -> Tuple[int, str]:
-    return _enemy_variant_tier_index(variant_name, base_name), variant_name.casefold()
+def _enemy_base_variant_and_tier(enemy_name: str, db=None) -> Tuple[str, str, int]:
+    variant = hgx_combat.normalize_actor_name(enemy_name)
+    record = _lookup_enemy_record(db, variant)
+    if record is not None:
+        tier_index = PARAGON_TIER_BY_CHARACTER_TYPE.get(int(getattr(record, "character_type", 0) or 0))
+        if tier_index is not None:
+            variant_name = hgx_combat.normalize_actor_name(getattr(record, "name", "")) or variant or "Unknown"
+            base_name = _enemy_record_base_name(record, db)
+            if base_name:
+                return base_name, variant_name, tier_index
+
+    base_name, variant_name = _enemy_base_and_variant(enemy_name)
+    return base_name, variant_name, _enemy_variant_tier_index(variant_name, base_name)
+
+
+def _lookup_enemy_record(db, enemy_name: str):
+    if db is None or not enemy_name:
+        return None
+    lookup = getattr(db, "lookup", None)
+    if not callable(lookup):
+        return None
+    return lookup(enemy_name)
+
+
+def _enemy_record_base_name(record, db) -> str:
+    base_name = hgx_combat.normalize_actor_name(getattr(record, "base_name", ""))
+    if not base_name:
+        return ""
+    base_record = _lookup_enemy_record(db, base_name)
+    if base_record is not None:
+        return hgx_combat.normalize_actor_name(getattr(base_record, "name", "")) or base_name
+    return base_name
+
+
+def _enemy_variant_sort_key(
+    variant_name: str,
+    base_name: str,
+    variant_tiers: Optional[Dict[str, int]] = None,
+) -> Tuple[int, str]:
+    tier_index = None
+    if variant_tiers is not None:
+        tier_index = variant_tiers.get(variant_name)
+    if tier_index is None:
+        tier_index = _enemy_variant_tier_index(variant_name, base_name)
+    return tier_index, variant_name.casefold()
 
 
 def _enemy_variant_tier_index(variant_name: str, base_name: str) -> int:
@@ -1382,7 +1428,9 @@ def _format_enemy_tier_totals(enemy_kills: Dict[str, EnemyKillStats]) -> str:
     other_total = 0
     for group in enemy_kills.values():
         for variant_name, count in group.variants.items():
-            tier_index = _enemy_variant_tier_index(variant_name, group.base_name)
+            tier_index = group.variant_tiers.get(variant_name)
+            if tier_index is None:
+                tier_index = _enemy_variant_tier_index(variant_name, group.base_name)
             if 0 <= tier_index < len(totals):
                 totals[tier_index] += int(count or 0)
             else:
