@@ -4,6 +4,7 @@ import time
 import ctypes as C
 import ctypes.wintypes as W
 import re
+import weakref
 from xml.etree import ElementTree as ET
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -376,6 +377,8 @@ class OverlayTimerRule:
     disable_on_rest: bool
     color_rgb: int
     source: str
+    disable_pattern: Optional[Pattern] = None
+    scope: str = "self"
 
 
 @dataclass(frozen=True)
@@ -700,6 +703,8 @@ def _load_status_timer_rules(source_dir: str) -> Tuple[OverlayTimerRule, ...]:
             color_rgb = _timer_color_rgb(element.get("color"))
             source = file_name
             key = f"{file_name}:{index}:{tag}:{text}"
+            disable_pattern = None
+            scope = "self"
 
             if not text:
                 continue
@@ -721,6 +726,27 @@ def _load_status_timer_rules(source_dir: str) -> Tuple[OverlayTimerRule, ...]:
                     pattern = _build_var_timer_regex(raw_rule)
                 except re.error:
                     continue
+            elif tag == "state":
+                raw_rule = str(element.get("enableRule") or "").strip()
+                if not raw_rule:
+                    continue
+                try:
+                    pattern = re.compile(raw_rule)
+                except re.error:
+                    continue
+                disable_pattern = None
+                raw_disable_rule = str(element.get("disableRule") or "").strip()
+                if raw_disable_rule:
+                    try:
+                        disable_pattern = re.compile(raw_disable_rule)
+                    except re.error:
+                        disable_pattern = None
+                duration = 0.0
+                scope = str(element.get("scope") or "self").strip().lower()
+                if scope not in {"self", "party"}:
+                    scope = "self"
+                disable_on_death = _parse_bool(element.get("disableOnDeath"), True)
+                disable_on_rest = _parse_bool(element.get("disableOnRest"), True)
             elif tag == "spelltimer":
                 continue
             else:
@@ -737,6 +763,8 @@ def _load_status_timer_rules(source_dir: str) -> Tuple[OverlayTimerRule, ...]:
                 disable_on_rest=disable_on_rest,
                 color_rgb=color_rgb,
                 source=source,
+                disable_pattern=disable_pattern,
+                scope=scope,
             ))
     return tuple(rules)
 
@@ -6512,6 +6540,9 @@ class InGameTimersScript(ClientScriptBase):
     EFFECT_REQUEST_TIMEOUT_SECONDS = 14.0
     REST_RE = re.compile(r"\b(resting|rested|rests)\b", re.IGNORECASE)
     DEATH_RE = re.compile(r"\b(you are dead|you died|you have been killed)\b", re.IGNORECASE)
+    _party_state_lock = threading.RLock()
+    _party_state_instances = weakref.WeakSet()
+    _party_states: Dict[str, ActiveOverlayTimer] = {}
 
     def __init__(self, client, config: Dict[str, object], host):
         super().__init__(client, config, host)
@@ -6540,6 +6571,7 @@ class InGameTimersScript(ClientScriptBase):
 
     def on_start(self):
         super().on_start()
+        self._register_party_state_instance()
         self.enabled = True
         self.active.clear()
         self.pending_effect_queries.clear()
@@ -6586,6 +6618,7 @@ class InGameTimersScript(ClientScriptBase):
         self.pending_effect_queries.clear()
         self.limbo_actor_keys.clear()
         self.character_db = None
+        self._unregister_party_state_instance()
         self._clear_overlay()
         super().on_stop()
         self.host.emit("info", f"{self.client.display_name}: In-Game Timers stopped", script_id=self.script_id)
@@ -6604,6 +6637,7 @@ class InGameTimersScript(ClientScriptBase):
             self._clear_flagged_timers(rest=True)
         if self.DEATH_RE.search(line):
             changed = self._clear_buff_timers() or changed
+            changed = self._clear_party_states_for_actor(self._self_target_name()) or changed
 
         if self._handle_effect_timer_line(line, now):
             changed = True
@@ -6612,6 +6646,11 @@ class InGameTimersScript(ClientScriptBase):
         if self._handle_limbo_line(line, now):
             changed = True
         for rule in self.rules:
+            if rule.kind == "state":
+                if self._handle_state_rule_line(rule, line, now):
+                    changed = True
+                continue
+
             match = rule.pattern.search(line)
             if not match:
                 continue
@@ -6706,6 +6745,144 @@ class InGameTimersScript(ClientScriptBase):
         if removed:
             self.cleared_count += len(removed)
         return bool(removed)
+
+    def _register_party_state_instance(self):
+        with self._party_state_lock:
+            if not list(self._party_state_instances):
+                self._party_states.clear()
+            self._party_state_instances.add(self)
+
+    def _unregister_party_state_instance(self):
+        with self._party_state_lock:
+            self._party_state_instances.discard(self)
+            if not list(self._party_state_instances):
+                self._party_states.clear()
+
+    def _party_state_snapshot(self) -> Tuple[ActiveOverlayTimer, ...]:
+        with self._party_state_lock:
+            return tuple(self._party_states.values())
+
+    @classmethod
+    def _render_party_state_instances(cls):
+        with cls._party_state_lock:
+            instances = list(cls._party_state_instances)
+        for instance in instances:
+            if instance.enabled:
+                instance._render_overlay(force=True)
+
+    def _party_state_key(self, rule: OverlayTimerRule, actor: str) -> str:
+        actor_key = self._actor_primary_key(actor)
+        return f"party-state:{rule.key}:{actor_key}" if actor_key else f"party-state:{rule.key}"
+
+    def _state_key(self, rule: OverlayTimerRule) -> str:
+        return f"state:{rule.key}"
+
+    def _state_label(self, rule: OverlayTimerRule, actor: str = "") -> str:
+        if actor:
+            return f"{rule.text}: {actor}"
+        return rule.text
+
+    def _clear_local_state_label(self, label: str) -> bool:
+        label_key = str(label or "").strip().lower()
+        if not label_key:
+            return False
+        removed = [
+            key
+            for key, timer in self.active.items()
+            if timer.state == "state" and timer.label.strip().lower() == label_key
+        ]
+        for key in removed:
+            self.active.pop(key, None)
+        if removed:
+            self.cleared_count += len(removed)
+        return bool(removed)
+
+    def _activate_state_rule(self, rule: OverlayTimerRule, now: float) -> bool:
+        actor = self._self_target_name() if rule.scope == "party" else ""
+        label = self._state_label(rule, actor if rule.scope == "party" else "")
+        timer = ActiveOverlayTimer(
+            label=label,
+            description=rule.description,
+            expires_at=float("inf"),
+            duration_seconds=0.0,
+            color_rgb=rule.color_rgb,
+            disable_on_death=rule.disable_on_death,
+            disable_on_rest=rule.disable_on_rest,
+            source=rule.source,
+            state="state",
+        )
+
+        if rule.scope == "party":
+            local_removed = self._clear_local_state_label(rule.text)
+            key = self._party_state_key(rule, actor)
+            with self._party_state_lock:
+                previous = self._party_states.get(key)
+                if previous == timer:
+                    return local_removed
+                self._party_states[key] = timer
+            self.matched_count += 1
+            self.set_status(label)
+            self._render_party_state_instances()
+            return True
+
+        key = self._state_key(rule)
+        previous = self.active.get(key)
+        if previous == timer:
+            return False
+        self.active[key] = timer
+        self.matched_count += 1
+        self.set_status(label)
+        return True
+
+    def _clear_state_rule(self, rule: OverlayTimerRule) -> bool:
+        if rule.scope == "party":
+            actor = self._self_target_name()
+            key = self._party_state_key(rule, actor)
+            with self._party_state_lock:
+                removed = self._party_states.pop(key, None)
+            if removed is None:
+                return False
+            self.cleared_count += 1
+            self.set_status(f"{removed.label}: cleared")
+            self._render_party_state_instances()
+            return True
+
+        removed = self.active.pop(self._state_key(rule), None)
+        if removed is None:
+            return False
+        self.cleared_count += 1
+        self.set_status(f"{removed.label}: cleared")
+        return True
+
+    def _clear_party_states_for_actor(self, actor: str) -> bool:
+        actor_key = self._actor_primary_key(actor)
+        if not actor_key:
+            return False
+        removed_count = 0
+        prefix = "party-state:"
+        suffix = f":{actor_key}"
+        with self._party_state_lock:
+            removed_keys = [
+                key
+                for key in self._party_states
+                if key.startswith(prefix) and key.endswith(suffix)
+            ]
+            for key in removed_keys:
+                self._party_states.pop(key, None)
+            removed_count = len(removed_keys)
+
+        if not removed_count:
+            return False
+        self.cleared_count += removed_count
+        self._render_party_state_instances()
+        return True
+
+    def _handle_state_rule_line(self, rule: OverlayTimerRule, line: str, now: float) -> bool:
+        if rule.disable_pattern is not None and rule.disable_pattern.search(line):
+            return self._clear_state_rule(rule)
+        if not rule.pattern.search(line):
+            return False
+        return self._activate_state_rule(rule, now)
 
     def _actor_keys(self, value: object) -> Set[str]:
         text = hgx_combat.normalize_actor_name(str(value or ""))
@@ -7078,6 +7255,7 @@ class InGameTimersScript(ClientScriptBase):
                 method = hgx_combat.normalize_actor_name(averted.group("method"))
                 if self._actor_matches_self(player):
                     changed = self._clear_buff_timers() or changed
+                changed = self._clear_party_states_for_actor(player) or changed
                 if limbo_enabled:
                     changed = self._mark_limbo_recovered(player, method) or changed
                 continue
@@ -7088,6 +7266,7 @@ class InGameTimersScript(ClientScriptBase):
             killer, victim = parsed_kill
             if self._actor_matches_self(victim):
                 changed = self._clear_buff_timers() or changed
+            changed = self._clear_party_states_for_actor(victim) or changed
             if not limbo_enabled:
                 continue
             if not self._is_limbo_actor(victim):
@@ -7171,11 +7350,20 @@ class InGameTimersScript(ClientScriptBase):
     def _format_lines(self) -> Tuple[str, ...]:
         now = time.monotonic()
         max_timers = max(int(self.config.get("max_timers", 8)), 1)
-        timers = sorted(self.active.values(), key=lambda timer: (timer.expires_at, timer.label.lower()))
+        timers = sorted(
+            tuple(self.active.values()) + self._party_state_snapshot(),
+            key=lambda timer: (
+                0 if timer.state == "state" else 1 if timer.source == self.LIMBO_SOURCE else 2,
+                timer.expires_at,
+                timer.label.lower(),
+            ),
+        )
         lines = []
         for timer in timers[:max_timers]:
             remaining = timer.expires_at - now
-            if timer.source == self.LIMBO_SOURCE:
+            if timer.state == "state":
+                lines.append(f"{_overlay_line_color_prefix(timer.color_rgb)}{timer.label}")
+            elif timer.source == self.LIMBO_SOURCE:
                 state = "safe" if timer.state == "recovered" else "limbo"
                 line = f"{timer.label} {state} {_format_remaining(remaining)}"
                 lines.append(f"{_overlay_line_color_prefix(self._limbo_line_color(timer, remaining))}{line}")
@@ -7248,7 +7436,7 @@ class InGameTimersScript(ClientScriptBase):
         return {
             "rules": len(self.rules),
             "tracked_effects": len(self.spell_specs),
-            "active": len(self.active),
+            "active": len(self.active) + len(self._party_state_snapshot()),
             "pending_effects": len(self.pending_effect_queries),
             "matched_count": self.matched_count,
             "cleared_count": self.cleared_count,

@@ -18,6 +18,7 @@ from src.simkeys_app.simkeys_script_host import (
     WeaponRecommendation,
     _default_status_rules_dir,
     _load_hgx_spell_timer_specs,
+    _load_status_timer_rules,
     _spell_key,
     parse_chat_line_event,
 )
@@ -314,6 +315,73 @@ class ChatEventTests(unittest.TestCase):
         self.assertIn("spell:aura fear", script.active)
         self.assertNotIn("spell:shadow evade", script.active)
         self.assertIn("text:infected", script.active)
+
+    def test_ingame_timers_loads_hgx_state_rules(self):
+        rules = _load_status_timer_rules(_default_status_rules_dir())
+
+        self.assertTrue(any(rule.kind == "state" and rule.text == "Infected" for rule in rules))
+        self.assertTrue(any(
+            rule.kind == "state"
+            and rule.text == "Infected"
+            and rule.scope == "party"
+            and rule.pattern.search("The slaad drives its claws into you and implants something in you!")
+            and rule.disable_pattern is not None
+            and rule.disable_pattern.search("The continual contagion is lifted!")
+            for rule in rules
+        ))
+
+    def test_ingame_timers_slaad_disease_is_shared_to_all_timer_overlays(self):
+        host_a = FakeHost()
+        host_a.client.display_name = "Starcore-Lash-Quasi [1.0]"
+        host_a.client.character_name = "Starcore-Lash-Quasi [1.0]"
+        host_b = FakeHost()
+        host_b.client.display_name = "Starcore-Bard [5.0]"
+        host_b.client.character_name = "Starcore-Bard [5.0]"
+        script_a = InGameTimersScript(host_a.client, {}, host_a)
+        script_b = InGameTimersScript(host_b.client, {}, host_b)
+        script_a.on_start()
+        script_b.on_start()
+        try:
+            script_a.on_chat_event(parse_chat_line_event(
+                1,
+                "The slaad drives its claws into you and implants something in you!",
+            ))
+
+            self.assertIn("Infected: Starcore-Lash-Quasi [1.0]", host_a.overlays[-1][0])
+            self.assertIn("Infected: Starcore-Lash-Quasi [1.0]", host_b.overlays[-1][0])
+            self.assertNotIn("Infected: Starcore-Bard [5.0]", host_b.overlays[-1][0])
+
+            script_a.on_chat_event(parse_chat_line_event(2, "You feel something vile hatching inside your body!"))
+            self.assertEqual(host_a.overlays[-1][0].count("Infected"), 1)
+        finally:
+            script_a.on_stop()
+            script_b.on_stop()
+
+    def test_ingame_timers_party_disease_clears_on_named_death(self):
+        host_a = FakeHost()
+        host_a.client.display_name = "Starcore-Lash-Quasi [1.0]"
+        host_a.client.character_name = "Starcore-Lash-Quasi [1.0]"
+        host_b = FakeHost()
+        host_b.client.display_name = "Starcore-Bard [5.0]"
+        host_b.client.character_name = "Starcore-Bard [5.0]"
+        script_a = InGameTimersScript(host_a.client, {}, host_a)
+        script_b = InGameTimersScript(host_b.client, {}, host_b)
+        script_a.on_start()
+        script_b.on_start()
+        try:
+            script_a.on_chat_event(parse_chat_line_event(
+                1,
+                "The slaad drives its claws into you and implants something in you!",
+            ))
+            self.assertIn("Infected: Starcore-Lash-Quasi [1.0]", host_b.overlays[-1][0])
+
+            script_b.on_chat_event(parse_chat_line_event(2, "Someone killed Starcore-Lash-Quasi [1.0]"))
+
+            self.assertNotIn("Infected: Starcore-Lash-Quasi [1.0]", host_a.overlays[-1][0])
+            self.assertNotIn("Infected: Starcore-Lash-Quasi [1.0]", host_b.overlays[-1][0])
+        finally:
+            script_a.on_stop()
+            script_b.on_stop()
 
     def test_ingame_timers_limbo_deaths_run_in_parallel(self):
         host = FakeHost()

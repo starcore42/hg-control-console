@@ -32,6 +32,7 @@
 	<state text="Infected" description="Infected - Swarm master" color="Red" enableRule="^The swarm master plants something in your chest!$" disableRule="^The infestation is destroyed!$" disableOnDeath="true" />
 	<state text="Infected" description="Infected - Ekolid" color="Red" enableRule="^The ekolid drives an ovipositor into you and implants something in you!|You feel something vile hatching inside your body!$" disableRule="^The infestation is destroyed!$" disableOnDeath="true" />
 	<state text="Infected" description="Infected - Moliation Vine" color="Red" enableRule="^The Moliation Vine digs into your flesh, planting spores!$" disableRule="^The infestation is destroyed!$" disableOnDeath="true" />
+	<state text="Infected" description="Infected - Slaad" color="Red" scope="party" enableRule="^The slaad drives its claws into you and implants something in you!|You feel something vile hatching inside your body!$" disableRule="^The continual contagion is lifted!|The slaad eggs inside your body hatch and eat their way out of your corpse!$" disableOnDeath="true" />
 	<!-- Source: epic - immutable force.xml -->
 	<timer text="Immutable Force" description="Immutable Force" rule="^Immutable Force will be available again in 120 seconds\.$" duration="00:02:00" />
 	<!-- Source: epic - miracle.xml -->
