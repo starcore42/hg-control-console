@@ -7122,7 +7122,7 @@ class ClientScriptHost:
     def send_console(self, text: str):
         if self._chat_is_locked_out():
             raise RuntimeError("chat is locked out because the client is at the password prompt")
-        return runtime.send_chat(self.client, f"##{text}", 2)
+        return runtime.send_chat(self.client, f"!echo {text}", 2)
 
     def send_chat(self, text: str, mode: int = 2):
         if self._chat_is_locked_out():

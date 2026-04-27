@@ -23,6 +23,31 @@ class DamageMeterTests(unittest.TestCase):
       <damage type="Fire" immunity="0" resistance="0" />
     </damageImmunities>
   </creature>
+  <creature name="Advespa">
+    <damageImmunities>
+      <damage type="Fire" immunity="0" resistance="0" />
+    </damageImmunities>
+  </creature>
+  <creature name="Swarm Master">
+    <damageImmunities>
+      <damage type="Fire" immunity="0" resistance="0" />
+    </damageImmunities>
+  </creature>
+  <creature name="Superior Swarm Master">
+    <damageImmunities>
+      <damage type="Fire" immunity="0" resistance="0" />
+    </damageImmunities>
+  </creature>
+  <creature name="Elite Swarm Master">
+    <damageImmunities>
+      <damage type="Fire" immunity="0" resistance="0" />
+    </damageImmunities>
+  </creature>
+  <creature name="Raja">
+    <damageImmunities>
+      <damage type="Fire" immunity="0" resistance="0" />
+    </damageImmunities>
+  </creature>
   <creature name="Ignored Spectator" type="Ignore">
     <damageImmunities>
       <damage type="Fire" immunity="0" resistance="0" />
@@ -81,6 +106,32 @@ class DamageMeterTests(unittest.TestCase):
         self.assertEqual(summary.raw_healing, 30)
         self.assertEqual(summary.net, -20)
 
+    def test_reset_archives_previous_session_logs(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_dir = os.path.join(tmpdir, "chars")
+            log_dir = os.path.join(tmpdir, "logs", "damage-meter")
+            archive_dir = os.path.join(tmpdir, "logs", "damage-meter-archives")
+            os.makedirs(db_dir)
+            db = self.make_db(db_dir)
+            meter.reset_session_logs(log_dir)
+            recorder = meter.DamageMeterRecorder(1234, log_dir)
+            recorder.record_event(1, "Alice damages Acid Blob : 15 (5 acid 10 fire)", "Alice")
+            recorder.close()
+
+            meter.reset_session_logs(log_dir)
+
+            archives = sorted(name for name in os.listdir(archive_dir) if name.endswith(".zip"))
+            self.assertEqual(len(archives), 1)
+            self.assertRegex(archives[0], r"^damage-meter_\d{8}_\d{6}\.zip$")
+            self.assertFalse([name for name in os.listdir(log_dir) if name.startswith("chat_")])
+
+            summary = meter.analyze_archived_session(os.path.join(archive_dir, archives[0]), character_db=db)
+
+        self.assertEqual(summary.lines_seen, 1)
+        self.assertEqual(summary.raw_damage, 10)
+        self.assertEqual(summary.raw_healing, 30)
+        self.assertEqual(summary.net, -20)
+
     def test_session_log_analysis_reports_progress(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             db_dir = os.path.join(tmpdir, "chars")
@@ -104,6 +155,58 @@ class DamageMeterTests(unittest.TestCase):
         self.assertIn("Reading logs", phases)
         self.assertIn("Merging duplicate views", phases)
         self.assertIn("Classifying damage", phases)
+
+    def test_enemy_counts_party_damage_breakdown_and_deaths(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = self.make_db(tmpdir)
+            summary = meter.analyze_chat_records(
+                [
+                    {"time": 100.0, "pid": 1, "text": "Alice [1.0] damages Acid Blob : 100 (10 acid 60 fire 30 cold)"},
+                    {"time": 100.1, "pid": 1, "text": "Alice [1.0] killed Advespa"},
+                    {"time": 101.0, "pid": 1, "text": "Bob [1.0] killed Superior Swarm Master"},
+                    {"time": 101.1, "pid": 2, "text": "Bob [1.0] killed Superior Swarm Master"},
+                    {"time": 102.0, "pid": 1, "text": "Bob [1.0] killed Elite Swarm Master"},
+                    {"time": 103.0, "pid": 1, "text": "Raja killed Alice [1.0]"},
+                    {"time": 103.1, "pid": 1, "text": "Alice [1.0] averts death : Possum's Farce : *success*"},
+                    {"time": 104.0, "pid": 1, "text": "Raja killed Bob [1.0]"},
+                ],
+                character_db=db,
+            )
+
+        self.assertEqual(summary.enemy_kills_counted, 3)
+        self.assertEqual(summary.merged_kill_observations, 1)
+        self.assertEqual(summary.enemy_kills["advespa"].variants, {"Advespa": 1})
+        swarm = summary.enemy_kills["swarm master"]
+        self.assertEqual(swarm.total, 2)
+        self.assertEqual(swarm.variants, {"Superior Swarm Master": 1, "Elite Swarm Master": 1})
+        self.assertEqual(summary.actors["Alice [1.0]"].damage_by_type, {"Fire": 60, "Cold": 30})
+        self.assertEqual(summary.actors["Alice [1.0]"].healing_by_type, {"Acid": 60})
+        self.assertEqual(summary.deaths_counted, 2)
+        self.assertEqual(summary.deaths["Alice [1.0]"].killed_by, {"Raja": 1})
+        self.assertEqual(summary.deaths["Bob [1.0]"].killed_by, {"Raja": 1})
+
+        text = meter.format_summary_text(summary)
+        self.assertIn("Party Damage Breakdown", text)
+        self.assertIn("Enemy Counts", text)
+        self.assertIn("Swarm Master: 2", text)
+        self.assertIn("Party Deaths", text)
+        self.assertIn("Alice [1.0]:", text)
+
+    def test_save_summary_text_uses_run_timestamp(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_dir = os.path.join(tmpdir, "logs", "damage-meter")
+            report_dir = os.path.join(tmpdir, "logs", "damage-meter-reports")
+            os.makedirs(log_dir)
+            with open(os.path.join(log_dir, "session.json"), "w", encoding="utf-8") as handle:
+                handle.write('{"started": 1777240838.0}\n')
+            summary = meter.DamageMeterSummary(log_dir=log_dir)
+
+            path = meter.save_summary_text(summary, "hello", output_dir=report_dir)
+
+            self.assertTrue(os.path.isfile(path))
+            self.assertRegex(os.path.basename(path), r"^damage-meter-report_\d{8}_\d{6}\.txt$")
+            with open(path, "r", encoding="utf-8") as handle:
+                self.assertEqual(handle.read(), "hello\n")
 
     def test_multi_client_duplicate_views_count_once(self):
         with tempfile.TemporaryDirectory() as tmpdir:

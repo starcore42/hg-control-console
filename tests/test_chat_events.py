@@ -55,7 +55,7 @@ class FakeHost:
         return {"success": 1, "rc": 0, "err": 0}
 
     def send_console(self, text):
-        self.chats.append(f"##{text}")
+        self.chats.append(f"!echo {text}")
         return {"success": 1, "rc": 0, "err": 0}
 
     def trigger_slot(self, slot, page=0):
@@ -458,6 +458,22 @@ class ChatEventTests(unittest.TestCase):
         drink._poll_health_once()
         self.assertEqual(host.slots, [])
         self.assertIn("Paused", drink.status_text)
+
+    def test_autodrink_echo_uses_client_echo_command(self):
+        host = FakeHost()
+        drink = AutoDrinkScript(
+            host.client,
+            {"slot": 2, "echo_console": True, "lock_target": False, "threshold_percent": 80.0},
+            host,
+        )
+        drink.enabled = True
+        drink._read_health_snapshot = lambda: (50, 100, 50.0, "test")
+
+        drink._poll_health_once()
+
+        self.assertEqual(host.slots, [(0, 2)])
+        self.assertTrue(any(text.startswith("!echo HGCC autodrink 50/100") for text in host.chats))
+        self.assertFalse(any(text.startswith("##HGCC") for text in host.chats))
 
     def test_shifter_mode_only_swaps_when_current_weapon_heals(self):
         host = FakeHost()

@@ -2,8 +2,10 @@ import json
 import os
 import re
 import shutil
+import tempfile
 import threading
 import time
+import zipfile
 from dataclasses import dataclass, field
 from typing import Callable, Dict, Iterable, List, Optional, Tuple
 
@@ -12,11 +14,20 @@ from . import simkeys_hgx_data as hgx_data
 
 
 DAMAGE_METER_DIR_NAME = "damage-meter"
+DAMAGE_METER_ARCHIVE_DIR_NAME = "damage-meter-archives"
+DAMAGE_METER_REPORT_DIR_NAME = "damage-meter-reports"
 DAMAGE_METER_LOG_PATTERN = re.compile(r"^chat_\d+\.jsonl$", re.IGNORECASE)
+KILL_LINE_MARKER = " killed "
+DEATH_EVENT_RE = re.compile(
+    r"^(?P<player>.+?)\s+(?P<action>respawn|averts death)\s*:\s*(?P<method>.+?)\s*:\s*\*success\*\s*$",
+    re.IGNORECASE,
+)
 MAX_CHAT_LINE_LENGTH = 230
 MERGE_TIME_WINDOW_SECONDS = 1.25
 UNKNOWN_ACTOR_LABEL = "Unknown"
 PROGRESS_EMIT_INTERVAL = 1000
+PARAGON_PREFIXES = ("Elite", "Superior", "Paragon")
+REPORT_ARCHIVE_TIMESTAMP_RE = re.compile(r"damage-meter_(?P<stamp>\d{8}_\d{6})(?:_\d+)?\.zip$", re.IGNORECASE)
 CHAT_TIMESTAMP_RE = re.compile(
     r"^\[CHAT WINDOW TEXT\]\s*\[(?P<stamp>[A-Z][a-z]{2}\s+[A-Z][a-z]{2}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2})\]",
     re.IGNORECASE,
@@ -74,13 +85,37 @@ class DamageMeterActorStats:
 
 
 @dataclass
+class EnemyKillStats:
+    base_name: str
+    total: int = 0
+    variants: Dict[str, int] = field(default_factory=dict)
+
+    def sorted_variants(self) -> List[Tuple[str, int]]:
+        return sorted(
+            self.variants.items(),
+            key=lambda item: (_enemy_variant_sort_key(item[0], self.base_name), item[0].casefold()),
+        )
+
+
+@dataclass
+class DeathStats:
+    name: str
+    deaths: int = 0
+    killed_by: Dict[str, int] = field(default_factory=dict)
+
+
+@dataclass
 class DamageMeterSummary:
     log_dir: str = ""
     lines_seen: int = 0
     damage_lines_seen: int = 0
+    kill_lines_seen: int = 0
     counted_lines: int = 0
     ignored_lines: int = 0
     merged_observations: int = 0
+    merged_kill_observations: int = 0
+    enemy_kills_counted: int = 0
+    deaths_counted: int = 0
     ambiguous_observations: int = 0
     resolved_ambiguous_events: int = 0
     unresolved_ambiguous_events: int = 0
@@ -90,6 +125,8 @@ class DamageMeterSummary:
     damage_by_type: Dict[str, int] = field(default_factory=dict)
     healing_by_type: Dict[str, int] = field(default_factory=dict)
     actors: Dict[str, DamageMeterActorStats] = field(default_factory=dict)
+    enemy_kills: Dict[str, EnemyKillStats] = field(default_factory=dict)
+    deaths: Dict[str, DeathStats] = field(default_factory=dict)
 
     @property
     def net(self) -> int:
@@ -103,6 +140,12 @@ class DamageMeterSummary:
         else:
             sort_key = lambda item: (-item.net, item.name.casefold())
         return sorted(self.actors.values(), key=sort_key)
+
+    def sorted_enemy_kills(self) -> List[EnemyKillStats]:
+        return sorted(self.enemy_kills.values(), key=lambda item: (item.base_name.casefold(), -item.total))
+
+    def sorted_deaths(self) -> List[DeathStats]:
+        return sorted(self.deaths.values(), key=lambda item: (-item.deaths, item.name.casefold()))
 
 
 @dataclass(frozen=True)
@@ -129,6 +172,89 @@ class DamageObservation:
     @property
     def has_ambiguous_actor(self) -> bool:
         return _is_ambiguous_actor(self.attacker) or _is_ambiguous_actor(self.defender)
+
+
+@dataclass(frozen=True)
+class KillObservation:
+    index: int
+    sequence: int
+    pid: int
+    client_name: str
+    captured_at: float
+    event_time: Optional[float]
+    source_key: str
+    normalized_text: str
+    killer: str
+    victim: str
+
+
+@dataclass
+class KillEventCluster:
+    observations: List[KillObservation] = field(default_factory=list)
+
+    @property
+    def representative(self) -> KillObservation:
+        return max(
+            self.observations,
+            key=lambda observation: (
+                _actor_specificity(observation.killer) + _actor_specificity(observation.victim),
+                -observation.index,
+            ),
+        )
+
+    @property
+    def killer(self) -> str:
+        return _choose_cluster_actor(observation.killer for observation in self.observations)
+
+    @property
+    def victim(self) -> str:
+        return _choose_cluster_actor(observation.victim for observation in self.observations)
+
+
+@dataclass(frozen=True)
+class DeathObservation:
+    index: int
+    sequence: int
+    pid: int
+    client_name: str
+    captured_at: float
+    event_time: Optional[float]
+    source_key: str
+    normalized_text: str
+    victim: str
+    cause: str
+    kind: str
+
+
+@dataclass
+class DeathEventCluster:
+    observations: List[DeathObservation] = field(default_factory=list)
+
+    @property
+    def representative(self) -> DeathObservation:
+        return max(
+            self.observations,
+            key=lambda observation: (
+                1 if observation.kind == "kill" else 0,
+                _actor_specificity(observation.cause),
+                -observation.index,
+            ),
+        )
+
+    @property
+    def victim(self) -> str:
+        return _choose_cluster_actor(observation.victim for observation in self.observations)
+
+    @property
+    def cause(self) -> str:
+        kill_causes = [
+            observation.cause
+            for observation in self.observations
+            if observation.kind == "kill" and observation.cause
+        ]
+        if kill_causes:
+            return _choose_cluster_actor(kill_causes)
+        return self.representative.cause or "Unknown"
 
 
 @dataclass
@@ -216,9 +342,127 @@ def session_log_dir(root_dir: Optional[str] = None) -> str:
     return os.path.join(os.path.abspath(root_dir or project_root()), "logs", DAMAGE_METER_DIR_NAME)
 
 
+def session_archive_dir(root_dir: Optional[str] = None) -> str:
+    return os.path.join(os.path.abspath(root_dir or project_root()), "logs", DAMAGE_METER_ARCHIVE_DIR_NAME)
+
+
+def session_report_dir(root_dir: Optional[str] = None) -> str:
+    return os.path.join(os.path.abspath(root_dir or project_root()), "logs", DAMAGE_METER_REPORT_DIR_NAME)
+
+
+def _archive_dir_for_log_dir(log_dir: str) -> str:
+    parent = os.path.dirname(os.path.abspath(log_dir))
+    return os.path.join(parent, DAMAGE_METER_ARCHIVE_DIR_NAME)
+
+
+def _session_started_at(directory: str) -> float:
+    path = os.path.join(directory, "session.json")
+    try:
+        with open(path, "r", encoding="utf-8-sig") as handle:
+            payload = json.load(handle)
+        return float(payload.get("started") or 0.0)
+    except Exception:
+        return 0.0
+
+
+def _archive_timestamp(directory: str, paths: List[str]) -> str:
+    started = _session_started_at(directory)
+    if started <= 0.0:
+        mtimes = []
+        for path in paths:
+            try:
+                mtimes.append(os.path.getmtime(path))
+            except OSError:
+                pass
+        started = min(mtimes) if mtimes else time.time()
+    return time.strftime("%Y%m%d_%H%M%S", time.localtime(started))
+
+
+def _unique_archive_path(directory: str, base_name: str) -> str:
+    path = os.path.join(directory, base_name)
+    if not os.path.exists(path):
+        return path
+    root, ext = os.path.splitext(base_name)
+    index = 2
+    while True:
+        candidate = os.path.join(directory, f"{root}_{index}{ext}")
+        if not os.path.exists(candidate):
+            return candidate
+        index += 1
+
+
+def _archivable_session_paths(directory: str) -> List[str]:
+    if not os.path.isdir(directory):
+        return []
+    paths = []
+    for root, _dirs, names in os.walk(directory):
+        for name in names:
+            path = os.path.join(root, name)
+            if os.path.isfile(path):
+                paths.append(path)
+    return sorted(paths)
+
+
+def archive_session_logs(log_dir: Optional[str] = None, archive_dir: Optional[str] = None) -> str:
+    directory = os.path.abspath(log_dir or session_log_dir())
+    if not os.path.isdir(directory):
+        return ""
+
+    chat_paths = _saved_chat_log_paths(directory)
+    if not chat_paths:
+        return ""
+
+    paths = _archivable_session_paths(directory)
+    if not paths:
+        return ""
+
+    destination_dir = os.path.abspath(archive_dir or _archive_dir_for_log_dir(directory))
+    os.makedirs(destination_dir, exist_ok=True)
+    archive_name = f"damage-meter_{_archive_timestamp(directory, paths)}.zip"
+    archive_path = _unique_archive_path(destination_dir, archive_name)
+    with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for path in paths:
+            archive.write(path, os.path.relpath(path, directory))
+    return archive_path
+
+
+def _report_timestamp_for_summary(summary: DamageMeterSummary) -> str:
+    source = os.path.abspath(str(getattr(summary, "log_dir", "") or ""))
+    if source and os.path.isfile(source):
+        match = REPORT_ARCHIVE_TIMESTAMP_RE.search(os.path.basename(source))
+        if match is not None:
+            return match.group("stamp")
+        try:
+            return time.strftime("%Y%m%d_%H%M%S", time.localtime(os.path.getmtime(source)))
+        except OSError:
+            pass
+    if source and os.path.isdir(source):
+        started = _session_started_at(source)
+        if started > 0.0:
+            return time.strftime("%Y%m%d_%H%M%S", time.localtime(started))
+    return time.strftime("%Y%m%d_%H%M%S", time.localtime(time.time()))
+
+
+def save_summary_text(
+    summary: DamageMeterSummary,
+    text: str,
+    output_dir: Optional[str] = None,
+) -> str:
+    destination_dir = os.path.abspath(output_dir or session_report_dir())
+    os.makedirs(destination_dir, exist_ok=True)
+    report_name = f"damage-meter-report_{_report_timestamp_for_summary(summary)}.txt"
+    report_path = _unique_archive_path(destination_dir, report_name)
+    with open(report_path, "w", encoding="utf-8") as handle:
+        handle.write(str(text or ""))
+        if not str(text or "").endswith("\n"):
+            handle.write("\n")
+    return report_path
+
+
 def reset_session_logs(log_dir: Optional[str] = None) -> str:
     directory = os.path.abspath(log_dir or session_log_dir())
     if os.path.isdir(directory):
+        archive_session_logs(directory)
         for name in os.listdir(directory):
             path = os.path.join(directory, name)
             if os.path.isdir(path):
@@ -390,6 +634,51 @@ def analyze_session_logs(
     return summary
 
 
+def _safe_extract_zip(archive: zipfile.ZipFile, destination: str):
+    destination_root = os.path.abspath(destination)
+    for member in archive.infolist():
+        target_path = os.path.abspath(os.path.join(destination_root, member.filename))
+        if target_path != destination_root and not target_path.startswith(destination_root + os.sep):
+            raise ValueError(f"Archive member escapes destination: {member.filename}")
+        archive.extract(member, destination_root)
+
+
+def analyze_archived_session(
+    archive_path: str,
+    character_db=None,
+    progress_callback: ProgressCallback = None,
+) -> DamageMeterSummary:
+    archive_path = os.path.abspath(str(archive_path or ""))
+    if not archive_path or not os.path.isfile(archive_path):
+        raise FileNotFoundError(archive_path)
+    if not zipfile.is_zipfile(archive_path):
+        raise ValueError(f"Not a damage meter archive: {archive_path}")
+
+    _emit_progress(progress_callback, "Extracting archive", 0, 1, 0.0)
+    with tempfile.TemporaryDirectory(prefix="simkeys-damage-meter-") as tmpdir:
+        with zipfile.ZipFile(archive_path, "r") as archive:
+            _safe_extract_zip(archive, tmpdir)
+        _emit_progress(progress_callback, "Extracting archive", 1, 1, 5.0)
+
+        def archive_progress(event: dict):
+            scaled = _scale_progress_event(event, 5.0, 100.0)
+            _emit_progress(
+                progress_callback,
+                scaled.get("phase", event.get("phase", "")),
+                scaled.get("current", 0),
+                scaled.get("total", 0),
+                scaled.get("percent"),
+            )
+
+        summary = analyze_session_logs(
+            tmpdir,
+            character_db=character_db,
+            progress_callback=archive_progress,
+        )
+    summary.log_dir = archive_path
+    return summary
+
+
 def analyze_chat_records(
     records: Iterable[object],
     character_db=None,
@@ -399,6 +688,8 @@ def analyze_chat_records(
     db = character_db or hgx_data.load_default_database()
     summary = DamageMeterSummary(log_dir=os.path.abspath(log_dir) if log_dir else "")
     observations = []
+    kill_observations = []
+    death_observations = []
     for index, record in enumerate(records, start=1):
         if index == 1 or index % PROGRESS_EMIT_INTERVAL == 0:
             _emit_progress(progress_callback, "Parsing damage lines", index, 0)
@@ -407,6 +698,63 @@ def analyze_chat_records(
             continue
 
         summary.lines_seen += 1
+        source_key = _source_key(pid, client_name)
+        event_time = _event_time(text, captured_at)
+        parsed_kill = _parse_kill_line(text)
+        if parsed_kill is not None:
+            killer, victim = parsed_kill
+            summary.kill_lines_seen += 1
+            kill_observations.append(
+                KillObservation(
+                    index=index,
+                    sequence=sequence,
+                    pid=pid,
+                    client_name=client_name,
+                    captured_at=captured_at,
+                    event_time=event_time,
+                    source_key=source_key,
+                    normalized_text=hgx_combat.normalize_chat_line(text),
+                    killer=killer,
+                    victim=victim,
+                )
+            )
+            if _is_party_death(killer, victim, db):
+                death_observations.append(
+                    DeathObservation(
+                        index=index,
+                        sequence=sequence,
+                        pid=pid,
+                        client_name=client_name,
+                        captured_at=captured_at,
+                        event_time=event_time,
+                        source_key=source_key,
+                        normalized_text=hgx_combat.normalize_chat_line(text),
+                        victim=victim,
+                        cause=killer,
+                        kind="kill",
+                    )
+                )
+
+        parsed_death = _parse_death_event_line(text)
+        if parsed_death is not None:
+            player, method = parsed_death
+            if _is_party_actor(player, db):
+                death_observations.append(
+                    DeathObservation(
+                        index=index,
+                        sequence=sequence,
+                        pid=pid,
+                        client_name=client_name,
+                        captured_at=captured_at,
+                        event_time=event_time,
+                        source_key=source_key,
+                        normalized_text=hgx_combat.normalize_chat_line(text),
+                        victim=player,
+                        cause=method,
+                        kind="death",
+                    )
+                )
+
         damage = hgx_combat.parse_damage_line(text)
         if damage is None:
             continue
@@ -429,6 +777,21 @@ def analyze_chat_records(
             summary.ambiguous_observations += 1
 
     _emit_progress(progress_callback, "Parsing damage lines", summary.lines_seen, summary.lines_seen)
+    kill_clusters = _merge_kill_observations(kill_observations)
+    summary.merged_kill_observations = max(len(kill_observations) - len(kill_clusters), 0)
+    for cluster in kill_clusters:
+        victim = cluster.victim
+        if not _is_enemy(victim, db):
+            continue
+        _add_enemy_kill(summary, victim)
+
+    death_clusters = _merge_death_observations(death_observations)
+    for cluster in death_clusters:
+        victim = cluster.victim
+        if not _is_party_actor(victim, db):
+            continue
+        _add_death(summary, victim, cluster.cause)
+
     clusters = _merge_damage_observations(observations, progress_callback=progress_callback)
     summary.merged_observations = max(len(observations) - len(clusters), 0)
     total_clusters = len(clusters)
@@ -476,14 +839,17 @@ def analyze_chat_records(
     return summary
 
 
-def format_summary_text(summary: DamageMeterSummary, actor_limit: int = 18) -> str:
+def format_summary_text(summary: DamageMeterSummary, actor_limit: int = 1000) -> str:
     lines = [
         f"Lines: {summary.lines_seen:,}   damage views: {summary.damage_lines_seen:,}   events: {summary.counted_lines:,}",
         f"Totals: net {summary.net:,}   raw {summary.raw_damage:,}   enemy healing {summary.raw_healing:,}",
+        f"Kills: enemies {summary.enemy_kills_counted:,}   kill views {summary.kill_lines_seen:,}   party deaths {summary.deaths_counted:,}",
     ]
     merge_parts = []
     if summary.merged_observations:
         merge_parts.append(f"merged duplicate views {summary.merged_observations:,}")
+    if summary.merged_kill_observations:
+        merge_parts.append(f"merged duplicate kill views {summary.merged_kill_observations:,}")
     if summary.ambiguous_observations:
         merge_parts.append(
             f"someone views {summary.ambiguous_observations:,}"
@@ -500,23 +866,53 @@ def format_summary_text(summary: DamageMeterSummary, actor_limit: int = 18) -> s
     if not actors:
         lines.append("")
         lines.append("No party damage against characters.d enemies has been saved this session yet.")
-        return "\n".join(lines)
+    else:
+        lines.append("")
+        lines.append("Damage Summary")
+        lines.append(f"{'Name':<32} {'Net':>10} {'Raw':>10} {'Healing':>10} {'Hits':>6}")
+        lines.append("-" * 74)
+        for actor in actors[:actor_limit]:
+            lines.append(
+                f"{_trim(actor.name, 32):<32} "
+                f"{actor.net:>10,} {actor.raw_damage:>10,} {actor.raw_healing:>10,} {actor.counted_lines:>6,}"
+            )
+
+        if len(actors) > actor_limit:
+            lines.append(f"... {len(actors) - actor_limit} more")
+
+        lines.append("")
+        lines.append("Damage by element: " + _format_counts(summary.damage_by_type))
+        lines.append("Healing by element: " + _format_counts(summary.healing_by_type))
+
+        lines.append("")
+        lines.append("Party Damage Breakdown")
+        for actor in actors[:actor_limit]:
+            lines.append(f"{actor.name}:")
+            lines.append(f"  Damage: {_format_counts(actor.damage_by_type, limit=24)}")
+            if actor.raw_healing:
+                lines.append(f"  Enemy healing caused: {_format_counts(actor.healing_by_type, limit=24)}")
 
     lines.append("")
-    lines.append(f"{'Name':<32} {'Net':>10} {'Raw':>10} {'Healing':>10} {'Hits':>6}")
-    lines.append("-" * 74)
-    for actor in actors[:actor_limit]:
-        lines.append(
-            f"{_trim(actor.name, 32):<32} "
-            f"{actor.net:>10,} {actor.raw_damage:>10,} {actor.raw_healing:>10,} {actor.counted_lines:>6,}"
-        )
-
-    if len(actors) > actor_limit:
-        lines.append(f"... {len(actors) - actor_limit} more")
+    lines.append("Enemy Counts")
+    enemy_groups = summary.sorted_enemy_kills()
+    if not enemy_groups:
+        lines.append("-")
+    else:
+        for group in enemy_groups:
+            lines.append(f"{group.base_name}: {group.total:,}")
+            for variant_name, count in group.sorted_variants():
+                lines.append(f"  {variant_name}: {count:,}")
 
     lines.append("")
-    lines.append("Damage by element: " + _format_counts(summary.damage_by_type))
-    lines.append("Healing by element: " + _format_counts(summary.healing_by_type))
+    lines.append("Party Deaths")
+    death_stats = summary.sorted_deaths()
+    if not death_stats:
+        lines.append("-")
+    else:
+        for death in death_stats:
+            lines.append(f"{death.name}: {death.deaths:,}")
+            lines.append(f"  To: {_format_counts(death.killed_by, limit=24)}")
+
     return "\n".join(lines)
 
 
@@ -566,11 +962,110 @@ def _is_party_damage_to_enemy(attacker: str, defender: str, db) -> bool:
     return not _is_enemy(attacker, db) and _is_enemy(defender, db)
 
 
+def _is_party_actor(name: str, db) -> bool:
+    return bool(str(name or "").strip()) and not _is_ambiguous_actor(name) and not _is_enemy(name, db)
+
+
+def _looks_like_player_name(name: str) -> bool:
+    return bool(re.search(r"\[[0-9]+(?:\.[0-9]+)?\]", str(name or "")))
+
+
+def _is_party_death(killer: str, victim: str, db) -> bool:
+    if not _is_party_actor(victim, db):
+        return False
+    return _is_enemy(killer, db) or _is_ambiguous_actor(killer) or _looks_like_player_name(victim)
+
+
 def _is_enemy(name: str, db) -> bool:
     record = db.lookup(name)
     if record is None:
         return False
     return int(getattr(record, "character_type", 0) or 0) >= 0
+
+
+def _parse_kill_line(text: str) -> Optional[Tuple[str, str]]:
+    normalized = hgx_combat.normalize_chat_line(text)
+    if not normalized:
+        return None
+    if normalized.startswith("You have the following accomplishments"):
+        return None
+    if "You cannot gain experience, tags, or random loot from monsters killed in a different area." in normalized:
+        return None
+
+    lowered = normalized.lower()
+    marker_at = lowered.find(KILL_LINE_MARKER)
+    if marker_at <= 0:
+        return None
+
+    killer = hgx_combat.normalize_actor_name(normalized[:marker_at])
+    victim = hgx_combat.normalize_actor_name(normalized[marker_at + len(KILL_LINE_MARKER):])
+    if not killer or not victim:
+        return None
+    return killer, victim
+
+
+def _parse_death_event_line(text: str) -> Optional[Tuple[str, str]]:
+    normalized = hgx_combat.normalize_chat_line(text)
+    match = DEATH_EVENT_RE.match(normalized)
+    if match is None:
+        return None
+    player = hgx_combat.normalize_actor_name(match.group("player"))
+    method = hgx_combat.normalize_actor_name(match.group("method")) or "Unknown"
+    if not player:
+        return None
+    return player, method
+
+
+def _add_enemy_kill(summary: DamageMeterSummary, enemy_name: str):
+    base_name, variant_name = _enemy_base_and_variant(enemy_name)
+    key = base_name.casefold()
+    stats = summary.enemy_kills.get(key)
+    if stats is None:
+        stats = EnemyKillStats(base_name=base_name)
+        summary.enemy_kills[key] = stats
+    stats.total += 1
+    stats.variants[variant_name] = int(stats.variants.get(variant_name, 0)) + 1
+    summary.enemy_kills_counted += 1
+
+
+def _add_death(summary: DamageMeterSummary, victim: str, cause: str):
+    name = hgx_combat.normalize_actor_name(victim)
+    cause_name = hgx_combat.normalize_actor_name(cause) or "Unknown"
+    if not name:
+        return
+    stats = summary.deaths.get(name)
+    if stats is None:
+        stats = DeathStats(name=name)
+        summary.deaths[name] = stats
+    stats.deaths += 1
+    stats.killed_by[cause_name] = int(stats.killed_by.get(cause_name, 0)) + 1
+    summary.deaths_counted += 1
+
+
+def _enemy_base_and_variant(enemy_name: str) -> Tuple[str, str]:
+    variant = hgx_combat.normalize_actor_name(enemy_name)
+    base = variant
+    changed = True
+    while changed:
+        changed = False
+        for prefix in PARAGON_PREFIXES:
+            marker = prefix + " "
+            if base.casefold().startswith(marker.casefold()):
+                base = base[len(marker):].strip()
+                changed = True
+                break
+    return base or variant, variant or "Unknown"
+
+
+def _enemy_variant_sort_key(variant_name: str, base_name: str) -> Tuple[int, str]:
+    variant_key = variant_name.casefold()
+    base_key = base_name.casefold()
+    if variant_key == base_key:
+        return 0, variant_key
+    for index, prefix in enumerate(PARAGON_PREFIXES, start=1):
+        if variant_key == f"{prefix} {base_name}".casefold():
+            return index, variant_key
+    return len(PARAGON_PREFIXES) + 1, variant_key
 
 
 def _classify_damage_line(damage, db, defender_name: Optional[str] = None):
@@ -650,6 +1145,126 @@ def _merge_damage_observations(
         else:
             cluster.observations.append(observation)
     return clusters
+
+
+def _merge_kill_observations(observations: List[KillObservation]) -> List[KillEventCluster]:
+    clusters: List[KillEventCluster] = []
+    candidates: List[KillEventCluster] = []
+    for observation in sorted(
+        observations,
+        key=lambda item: (item.event_time if item.event_time is not None else float("inf"), item.index),
+    ):
+        if observation.event_time is not None:
+            _prune_timed_cluster_candidates(candidates, observation.event_time)
+        cluster = _find_matching_kill_cluster(candidates, observation)
+        if cluster is None:
+            cluster = KillEventCluster(observations=[observation])
+            clusters.append(cluster)
+            candidates.append(cluster)
+        else:
+            cluster.observations.append(observation)
+    return clusters
+
+
+def _find_matching_kill_cluster(
+    clusters: List[KillEventCluster],
+    observation: KillObservation,
+) -> Optional[KillEventCluster]:
+    best_cluster = None
+    best_score = None
+    for cluster in clusters:
+        if not _kill_cluster_can_accept(cluster, observation):
+            continue
+        score = _kill_cluster_match_score(cluster, observation)
+        if best_score is None or score > best_score:
+            best_score = score
+            best_cluster = cluster
+    return best_cluster
+
+
+def _kill_cluster_can_accept(cluster: KillEventCluster, observation: KillObservation) -> bool:
+    if any(existing.source_key == observation.source_key for existing in cluster.observations):
+        return False
+    reference = cluster.representative
+    if not _times_compatible(reference, observation):
+        return False
+    if not _actors_compatible(cluster.killer, observation.killer):
+        return False
+    if not _actors_compatible(cluster.victim, observation.victim):
+        return False
+    return True
+
+
+def _kill_cluster_match_score(cluster: KillEventCluster, observation: KillObservation) -> Tuple[int, float, int]:
+    reference = cluster.representative
+    shared_specific_names = 0
+    if _same_specific_actor(cluster.killer, observation.killer):
+        shared_specific_names += 1
+    if _same_specific_actor(cluster.victim, observation.victim):
+        shared_specific_names += 1
+    if reference.event_time is None or observation.event_time is None:
+        time_distance = 0.0 if reference.normalized_text == observation.normalized_text else MERGE_TIME_WINDOW_SECONDS
+    else:
+        time_distance = abs(reference.event_time - observation.event_time)
+    specificity = _actor_specificity(cluster.killer) + _actor_specificity(cluster.victim)
+    return shared_specific_names, -time_distance, specificity
+
+
+def _merge_death_observations(observations: List[DeathObservation]) -> List[DeathEventCluster]:
+    clusters: List[DeathEventCluster] = []
+    candidates: List[DeathEventCluster] = []
+    for observation in sorted(
+        observations,
+        key=lambda item: (item.event_time if item.event_time is not None else float("inf"), item.index),
+    ):
+        if observation.event_time is not None:
+            _prune_timed_cluster_candidates(candidates, observation.event_time)
+        cluster = _find_matching_death_cluster(candidates, observation)
+        if cluster is None:
+            cluster = DeathEventCluster(observations=[observation])
+            clusters.append(cluster)
+            candidates.append(cluster)
+        else:
+            cluster.observations.append(observation)
+    return clusters
+
+
+def _find_matching_death_cluster(
+    clusters: List[DeathEventCluster],
+    observation: DeathObservation,
+) -> Optional[DeathEventCluster]:
+    best_cluster = None
+    best_score = None
+    for cluster in clusters:
+        if not _death_cluster_can_accept(cluster, observation):
+            continue
+        score = _death_cluster_match_score(cluster, observation)
+        if best_score is None or score > best_score:
+            best_score = score
+            best_cluster = cluster
+    return best_cluster
+
+
+def _death_cluster_can_accept(cluster: DeathEventCluster, observation: DeathObservation) -> bool:
+    if any(existing.source_key == observation.source_key and existing.kind == observation.kind for existing in cluster.observations):
+        return False
+    reference = cluster.representative
+    if not _times_compatible(reference, observation):
+        return False
+    if not _actors_compatible(cluster.victim, observation.victim):
+        return False
+    return True
+
+
+def _death_cluster_match_score(cluster: DeathEventCluster, observation: DeathObservation) -> Tuple[int, float, int]:
+    reference = cluster.representative
+    shared_specific_names = 1 if _same_specific_actor(cluster.victim, observation.victim) else 0
+    if reference.event_time is None or observation.event_time is None:
+        time_distance = 0.0 if reference.normalized_text == observation.normalized_text else MERGE_TIME_WINDOW_SECONDS
+    else:
+        time_distance = abs(reference.event_time - observation.event_time)
+    has_kill = 1 if any(existing.kind == "kill" for existing in cluster.observations) or observation.kind == "kill" else 0
+    return shared_specific_names, -time_distance, has_kill
 
 
 def _observation_merge_signature_key(observation: DamageObservation) -> Tuple[int, Tuple[Tuple[int, object], ...]]:

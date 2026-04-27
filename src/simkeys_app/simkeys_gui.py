@@ -5,7 +5,7 @@ import queue
 import sys
 import threading
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 
 from . import simkeys_damage_meter as damage_meter
@@ -983,6 +983,7 @@ class SimKeysDesktopApp:
         self.damage_meter_progress_frame = None
         self.damage_meter_progress = None
         self.damage_meter_calculate_button = None
+        self.damage_meter_archive_button = None
         self.log_text = None
         self.sections_scroller = None
         self.script_container = None
@@ -1349,16 +1350,23 @@ class SimKeysDesktopApp:
             width=12,
         )
         self.damage_meter_calculate_button.grid(row=0, column=1, padx=(8, 0))
-        ttk.Button(damage_header, text="Post Net", command=lambda: self.post_damage_meter_async("net"), width=10).grid(row=0, column=2, padx=(6, 0))
-        ttk.Button(damage_header, text="Post Raw", command=lambda: self.post_damage_meter_async("raw"), width=10).grid(row=0, column=3, padx=(6, 0))
-        ttk.Button(damage_header, text="Post Healing", command=lambda: self.post_damage_meter_async("healing"), width=12).grid(row=0, column=4, padx=(6, 0))
-        ttk.Button(damage_header, text="Post Elements", command=lambda: self.post_damage_meter_async("breakdown"), width=13).grid(row=0, column=5, padx=(6, 0))
+        self.damage_meter_archive_button = ttk.Button(
+            damage_header,
+            text="Analyze Archive",
+            command=self.calculate_damage_meter_archive_async,
+            width=15,
+        )
+        self.damage_meter_archive_button.grid(row=0, column=2, padx=(6, 0))
+        ttk.Button(damage_header, text="Post Net", command=lambda: self.post_damage_meter_async("net"), width=10).grid(row=0, column=3, padx=(6, 0))
+        ttk.Button(damage_header, text="Post Raw", command=lambda: self.post_damage_meter_async("raw"), width=10).grid(row=0, column=4, padx=(6, 0))
+        ttk.Button(damage_header, text="Post Healing", command=lambda: self.post_damage_meter_async("healing"), width=12).grid(row=0, column=5, padx=(6, 0))
+        ttk.Button(damage_header, text="Post Elements", command=lambda: self.post_damage_meter_async("breakdown"), width=13).grid(row=0, column=6, padx=(6, 0))
         ttk.Button(
             damage_header,
             textvariable=self.damage_meter_toggle_var,
             command=self.toggle_damage_meter,
             width=18,
-        ).grid(row=0, column=6, padx=(12, 0), sticky="e")
+        ).grid(row=0, column=7, padx=(12, 0), sticky="e")
         self.damage_meter_progress_frame = ttk.Frame(damage_frame)
         self.damage_meter_progress_frame.grid(row=1, column=0, sticky="ew", pady=(0, 6))
         self.damage_meter_progress_frame.columnconfigure(0, weight=1)
@@ -1370,7 +1378,7 @@ class SimKeysDesktopApp:
         )
         self.damage_meter_progress.grid(row=0, column=0, sticky="ew")
         self.damage_meter_progress_frame.grid_remove()
-        self.damage_meter_text = ScrolledText(damage_frame, wrap="word", height=9, font=("Consolas", 9))
+        self.damage_meter_text = ScrolledText(damage_frame, wrap="word", height=16, font=("Consolas", 9))
         self.damage_meter_text.grid(row=2, column=0, sticky="ew")
         self.damage_meter_text.configure(state="disabled")
         self._set_damage_meter_text("Press Calculate to summarize this HGCC GUI session.")
@@ -1478,15 +1486,17 @@ class SimKeysDesktopApp:
         self.damage_meter_text.insert("1.0", str(text or ""))
         self.damage_meter_text.configure(state="disabled")
 
-    def calculate_damage_meter_async(self):
+    def calculate_damage_meter_async(self, source_path=None, source_label="current session", archived=False):
         if self.damage_meter_running:
             return
         self.damage_meter_run_id += 1
         run_id = self.damage_meter_run_id
         self.damage_meter_summary = None
         self._set_damage_meter_calculating(True)
-        self.damage_meter_status_var.set("Calculating damage...")
-        self._set_damage_meter_text("Calculating damage meter. Long sessions may take a little while.")
+        source_path = source_path or self.damage_meter_log_dir
+        source_label = str(source_label or "current session")
+        self.damage_meter_status_var.set(f"Calculating {source_label}...")
+        self._set_damage_meter_text(f"Calculating damage meter from {source_label}. Long sessions may take a little while.")
 
         def worker():
             def progress(payload):
@@ -1496,16 +1506,25 @@ class SimKeysDesktopApp:
                 self.enqueue_event(event)
 
             try:
-                summary = damage_meter.analyze_session_logs(
-                    self.damage_meter_log_dir,
-                    progress_callback=progress,
-                )
+                if archived:
+                    summary = damage_meter.analyze_archived_session(source_path, progress_callback=progress)
+                else:
+                    summary = damage_meter.analyze_session_logs(source_path, progress_callback=progress)
                 text = damage_meter.format_summary_text(summary)
+                text = f"Source: {source_label}\n{text}"
+                report_path = ""
+                try:
+                    report_path = damage_meter.save_summary_text(summary, text)
+                    text = f"{text}\n\nReport saved: {report_path}"
+                except Exception as save_exc:
+                    text = f"{text}\n\nReport save failed: {save_exc}"
                 self.enqueue_event({
                     "type": "damage-meter-result",
                     "run_id": run_id,
                     "summary": summary,
                     "text": text,
+                    "source_label": source_label,
+                    "report_path": report_path,
                 })
             except Exception as exc:
                 self.enqueue_event({
@@ -1516,10 +1535,32 @@ class SimKeysDesktopApp:
 
         threading.Thread(target=worker, name="SimKeysDamageMeter", daemon=True).start()
 
+    def calculate_damage_meter_archive_async(self):
+        archive_dir = damage_meter.session_archive_dir()
+        initial_dir = archive_dir if os.path.isdir(archive_dir) else os.path.dirname(self.damage_meter_log_dir)
+        path = filedialog.askopenfilename(
+            parent=self.root,
+            title="Analyze Damage Meter Archive",
+            initialdir=initial_dir,
+            filetypes=(
+                ("Damage meter archives", "*.zip"),
+                ("All files", "*.*"),
+            ),
+        )
+        if not path:
+            return
+        self.calculate_damage_meter_async(
+            source_path=path,
+            source_label=os.path.basename(path),
+            archived=True,
+        )
+
     def _set_damage_meter_calculating(self, calculating):
         self.damage_meter_running = bool(calculating)
         if self.damage_meter_calculate_button is not None:
             self.damage_meter_calculate_button.configure(state="disabled" if calculating else "normal")
+        if self.damage_meter_archive_button is not None:
+            self.damage_meter_archive_button.configure(state="disabled" if calculating else "normal")
         if self.damage_meter_progress_frame is not None:
             if calculating:
                 self.damage_meter_progress_frame.grid()
@@ -1690,8 +1731,9 @@ class SimKeysDesktopApp:
             self.damage_meter_summary = event.get("summary")
             self._set_damage_meter_text(event.get("text", ""))
             if self.damage_meter_summary is not None:
+                source_label = str(event.get("source_label") or "current session")
                 self.damage_meter_status_var.set(
-                    f"Damage: net {self.damage_meter_summary.net:,}   raw {self.damage_meter_summary.raw_damage:,}   healing {self.damage_meter_summary.raw_healing:,}"
+                    f"Damage ({source_label}): net {self.damage_meter_summary.net:,}   raw {self.damage_meter_summary.raw_damage:,}   healing {self.damage_meter_summary.raw_healing:,}"
                 )
             self.damage_meter_expanded = True
             self._apply_damage_meter_state()

@@ -172,9 +172,9 @@ HGCC has special handling for targets where only a specific known weapon is allo
 
 ## Damage Meter
 
-The GUI records new chat/log lines from injected clients into `logs\damage-meter\` for the current GUI session. The directory is reset when the GUI starts.
+The GUI records new chat/log lines from injected clients into `logs\damage-meter\` for the current GUI session. When the GUI starts, any previous session logs are zipped into `logs\damage-meter-archives\` using the run start date and time, then a fresh session log directory is created.
 
-Press `Calculate` in the Damage Meter panel to analyze the saved session. The calculation:
+Press `Calculate` in the Damage Meter panel to analyze the current saved session, or `Analyze Archive` to pick an older zipped run from the archive folder. The calculation:
 
 - Counts party damage against enemies known in `characters.d`.
 - Treats actors not present in `characters.d` as party members.
@@ -182,9 +182,11 @@ Press `Calculate` in the Damage Meter panel to analyze the saved session. The ca
 - Keeps hits that are visible to only one client.
 - Resolves some `someone` lines when another client saw the same event with real names.
 - Splits enemy healing from raw damage when the defender has a healing multiplier for the damage type.
-- Reports raw damage, enemy healing, net damage, per-actor totals, and element breakdowns.
+- Counts killed enemy types from kill lines, grouping base/superior/elite variants together.
+- Tracks party deaths, including averted-death procs, by victim and killer.
+- Reports raw damage, enemy healing, net damage, per-actor totals, per-member element breakdowns, enemy counts, deaths, and element totals.
 
-The progress bar reports the counting, reading, merging, and classifying phases. The report buttons post net, raw, healing, or element summaries through the selected injected client.
+The progress bar reports the counting, reading, merging, and classifying phases. The report buttons post net, raw, healing, or element summaries through the selected injected client. Each completed calculation also writes a timestamped text report to `logs\damage-meter-reports\`.
 
 ## Other Automation Scripts
 
