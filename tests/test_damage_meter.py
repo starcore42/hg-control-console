@@ -369,6 +369,50 @@ class DamageMeterTests(unittest.TestCase):
         self.assertEqual(summary.raw_healing, 40)
         self.assertEqual(summary.healing_by_type, {"Cold": 40})
 
+    def test_default_character_data_omnimentals_do_not_heal(self):
+        db = hgx_data.load_character_database(hgx_data.default_character_data_dir())
+        elemental_types = [
+            hgx_data.DAMAGE_TYPE_NAME_TO_ID[name]
+            for name in ("acid", "cold", "electrical", "fire", "sonic")
+        ]
+
+        for creature_name in ("Omnimental", "Greater Omnimental", "Superior Omnimental"):
+            with self.subTest(creature_name=creature_name):
+                profile = db._resolve_combat_profile(creature_name)
+                self.assertIsNotNone(profile)
+                self.assertTrue(all(profile.healing[damage_type] == 0 for damage_type in elemental_types))
+
+        summary = meter.analyze_chat_records(
+            ["Alice damages Superior Omnimental : 50 (10 acid 10 cold 10 electrical 10 fire 10 sonic)"],
+            character_db=db,
+        )
+
+        self.assertEqual(summary.raw_damage, 50)
+        self.assertEqual(summary.raw_healing, 0)
+        self.assertEqual(summary.healing_by_type, {})
+
+    def test_default_character_data_amorphions_do_not_heal(self):
+        db = hgx_data.load_character_database(hgx_data.default_character_data_dir())
+        elemental_types = [
+            hgx_data.DAMAGE_TYPE_NAME_TO_ID[name]
+            for name in ("acid", "cold", "electrical", "fire", "sonic")
+        ]
+
+        for creature_name in ("Amorphion", "Greater Amorphion", "Superior Amorphion", "Elite Amorphion"):
+            with self.subTest(creature_name=creature_name):
+                profile = db._resolve_combat_profile(creature_name)
+                self.assertIsNotNone(profile)
+                self.assertTrue(all(profile.healing[damage_type] == 0 for damage_type in elemental_types))
+
+        summary = meter.analyze_chat_records(
+            ["Alice damages Elite Amorphion : 50 (10 acid 10 cold 10 electrical 10 fire 10 sonic)"],
+            character_db=db,
+        )
+
+        self.assertEqual(summary.raw_damage, 50)
+        self.assertEqual(summary.raw_healing, 0)
+        self.assertEqual(summary.healing_by_type, {})
+
 
 if __name__ == "__main__":
     unittest.main()

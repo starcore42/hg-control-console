@@ -7,6 +7,7 @@ from src.simkeys_app import simkeys_hgx_data as hgx_data
 from src.simkeys_app.simkeys_script_host import (
     ActiveOverlayTimer,
     AutoAAScript,
+    AutoAttackScript,
     AutoDrinkScript,
     AutoFollowScript,
     ChatLineEvent,
@@ -40,6 +41,8 @@ class FakeHost:
         self.mask = 1 << 0
         self.recovery_until = 0.0
         self.recovery_reason = ""
+        self.auto_attack_pause_until = 0.0
+        self.auto_attack_pause_reason = ""
 
     def emit(self, level, message, script_id=None):
         self.events.append((level, message, script_id))
@@ -88,6 +91,24 @@ class FakeHost:
             return True
         self.recovery_until = 0.0
         self.recovery_reason = ""
+        return False
+
+    def set_auto_attack_pause(self, active, reason="", ttl_seconds=5.0):
+        if active:
+            self.auto_attack_pause_until = max(
+                self.auto_attack_pause_until,
+                time.monotonic() + max(float(ttl_seconds), 0.1),
+            )
+            self.auto_attack_pause_reason = str(reason or "Paused")
+        else:
+            self.auto_attack_pause_until = 0.0
+            self.auto_attack_pause_reason = ""
+
+    def is_auto_attack_paused(self):
+        if time.monotonic() < self.auto_attack_pause_until:
+            return True
+        self.auto_attack_pause_until = 0.0
+        self.auto_attack_pause_reason = ""
         return False
 
 
@@ -294,6 +315,71 @@ class ChatEventTests(unittest.TestCase):
         self.assertNotIn("spell:shadow evade", script.active)
         self.assertIn("text:infected", script.active)
 
+    def test_ingame_timers_limbo_deaths_run_in_parallel(self):
+        host = FakeHost()
+        script = InGameTimersScript(
+            host.client,
+            {
+                "limbo_duration_seconds": 300.0,
+                "limbo_names": "Alice [1.0]",
+            },
+            host,
+        )
+        script.on_start()
+
+        self.assertTrue(script._handle_limbo_line("Raja killed Alice [1.0]", 100.0))
+        self.assertTrue(script._handle_limbo_line("Sulfuron killed Alice [1.0]", 130.0))
+
+        limbo_timers = [
+            timer
+            for timer in script.active.values()
+            if timer.source == script.LIMBO_SOURCE and timer.label == "Alice [1.0]"
+        ]
+        self.assertEqual(len(limbo_timers), 2)
+        self.assertEqual(sorted(round(timer.expires_at) for timer in limbo_timers), [400, 430])
+        self.assertEqual(script.limbo_count, 2)
+
+        self.assertTrue(script._handle_limbo_line("Alice [1.0] respawn : Raise Dead : *success*", 140.0))
+        limbo_timers = sorted(
+            (
+                timer
+                for timer in script.active.values()
+                if timer.source == script.LIMBO_SOURCE and timer.label == "Alice [1.0]"
+            ),
+            key=lambda timer: timer.expires_at,
+        )
+        self.assertEqual([timer.state for timer in limbo_timers], ["limbo", "recovered"])
+
+    def test_ingame_timers_limbo_expiry_removes_only_that_countdown(self):
+        host = FakeHost()
+        script = InGameTimersScript(
+            host.client,
+            {
+                "limbo_duration_seconds": 300.0,
+                "limbo_names": "Alice [1.0]",
+            },
+            host,
+        )
+        script.on_start()
+
+        now = time.monotonic()
+        self.assertTrue(script._handle_limbo_line("Raja killed Alice [1.0]", now - 301.0))
+        self.assertTrue(script._handle_limbo_line("Sulfuron killed Alice [1.0]", now - 100.0))
+        self.assertEqual(
+            len([timer for timer in script.active.values() if timer.source == script.LIMBO_SOURCE]),
+            2,
+        )
+
+        script.on_tick()
+
+        limbo_timers = [
+            timer
+            for timer in script.active.values()
+            if timer.source == script.LIMBO_SOURCE and timer.label == "Alice [1.0]"
+        ]
+        self.assertEqual(len(limbo_timers), 1)
+        self.assertEqual(limbo_timers[0].description, "killed by Sulfuron")
+
     def test_host_routes_typed_events_without_broadcasting_to_every_script(self):
         delivered = []
         host = ClientScriptHost(FakeClient(), delivered.append)
@@ -475,6 +561,46 @@ class ChatEventTests(unittest.TestCase):
         self.assertTrue(any(text.startswith("!echo HGCC autodrink 50/100") for text in host.chats))
         self.assertFalse(any(text.startswith("##HGCC") for text in host.chats))
 
+    def test_autodrink_cooldown_pauses_auto_attack(self):
+        host = FakeHost()
+        drink = AutoDrinkScript(
+            host.client,
+            {
+                "slot": 2,
+                "echo_console": False,
+                "lock_target": False,
+                "resume_attack": False,
+                "threshold_percent": 80.0,
+                "cooldown_seconds": 0.1,
+            },
+            host,
+        )
+        drink.enabled = True
+        drink._read_health_snapshot = lambda: (50, 100, 50.0, "test")
+
+        drink._poll_health_once()
+
+        self.assertEqual(host.slots, [(0, 2)])
+        self.assertTrue(host.is_auto_attack_paused())
+        self.assertEqual(host.auto_attack_pause_reason, "AutoDrink cooldown")
+        time.sleep(0.25)
+        self.assertFalse(host.is_auto_attack_paused())
+
+    def test_auto_attack_skips_commands_during_autodrink_cooldown(self):
+        host = FakeHost()
+        host.set_auto_attack_pause(True, "AutoDrink cooldown", ttl_seconds=1.0)
+        attack = AutoAttackScript(host.client, {"cooldown_seconds": 0.1}, host)
+
+        attack.on_start()
+        deadline = time.monotonic() + 0.5
+        while "AutoDrink cooldown" not in attack.status_text and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertIn("AutoDrink cooldown", attack.status_text)
+        time.sleep(0.15)
+        attack.on_stop()
+
+        self.assertEqual(host.chats, [])
+
     def test_shifter_mode_only_swaps_when_current_weapon_heals(self):
         host = FakeHost()
         script = AutoAAScript(
@@ -624,6 +750,112 @@ class ChatEventTests(unittest.TestCase):
         self.assertEqual(host.slots, [])
         self.assertIn("< 300.0", script.status_text)
 
+    def test_shifter_unarmed_unshifted_recovers_to_least_healing_weapon(self):
+        host = FakeHost()
+        host.mask = 0
+        script = AutoAAScript(
+            host.client,
+            {
+                "mode": AutoAAScript.MODE_SHIFTER_WEAPON_SWAP,
+                "weapon_slot_1": "F1",
+                "weapon_slot_2": "F2",
+                "shift_slot": "F9",
+            },
+            host,
+        )
+        script.on_start()
+        script.current_weapon_key = "Unarmed"
+        script.shifter_shift_state = "unshifted"
+        script._profile_learning_complete = lambda profile: True
+        script._next_weapon_to_learn = lambda target: None
+        script.db.lookup = lambda name: True
+
+        def recommendation(binding, healing_score):
+            return WeaponRecommendation(
+                binding=binding,
+                expected_damage=0,
+                selection_damage=0,
+                actual_damage=None,
+                actual_observations=0,
+                matched_name="Dummy",
+                paragon_ranks=0,
+                learned_types=(4,),
+                estimated_components=((4, 100),),
+                healing_types=(4,),
+                ignored_types=(),
+                special_name="",
+                signature_observations=2,
+                estimate_observations=1,
+                healing_score=healing_score,
+            )
+
+        script._weapon_candidates_for_target = lambda name: [
+            recommendation(script.weapon_bindings["W1"], 600),
+            recommendation(script.weapon_bindings["W2"], 200),
+        ]
+
+        attack = combat.parse_attack_line("Starcore-StormReaper [2.0] attacks Dummy : *hit*")
+        script._handle_weapon_attack(attack)
+
+        self.assertEqual(host.chats, ["!lock opponent"])
+        self.assertEqual(host.slots[-1], (0, 2))
+        self.assertEqual(script.pending_weapon_key, "W2")
+        self.assertFalse(script.pending_weapon_unarm)
+        self.assertFalse(script.shifter_pending_unarm)
+        self.assertIn("recover unarmed", script.status_text)
+
+    def test_shifter_no_safe_weapon_uses_least_healing_instead_of_unarmed(self):
+        host = FakeHost()
+        script = AutoAAScript(
+            host.client,
+            {
+                "mode": AutoAAScript.MODE_SHIFTER_WEAPON_SWAP,
+                "weapon_slot_1": "F1",
+                "weapon_slot_2": "F2",
+                "shift_slot": "F9",
+            },
+            host,
+        )
+        script.on_start()
+        script.current_weapon_key = "W1"
+        script.shifter_shift_state = "shifted"
+        script._profile_learning_complete = lambda profile: True
+        script._next_weapon_to_learn = lambda target: None
+        script.db.lookup = lambda name: True
+
+        def recommendation(binding, healing_score):
+            return WeaponRecommendation(
+                binding=binding,
+                expected_damage=0,
+                selection_damage=0,
+                actual_damage=None,
+                actual_observations=0,
+                matched_name="Dummy",
+                paragon_ranks=0,
+                learned_types=(4,),
+                estimated_components=((4, 100),),
+                healing_types=(4,),
+                ignored_types=(),
+                special_name="",
+                signature_observations=2,
+                estimate_observations=1,
+                healing_score=healing_score,
+            )
+
+        script._weapon_candidates_for_target = lambda name: [
+            recommendation(script.weapon_bindings["W1"], 600),
+            recommendation(script.weapon_bindings["W2"], 200),
+        ]
+
+        attack = combat.parse_attack_line("Starcore-StormReaper [2.0] attacks Dummy : *hit*")
+        script._handle_weapon_attack(attack)
+
+        self.assertEqual(host.chats[:2], ["!lock opponent", "!cancel poly"])
+        self.assertEqual(script.shifter_pending_source_key, "W2")
+        self.assertFalse(script.pending_weapon_unarm)
+        self.assertFalse(script.shifter_pending_unarm)
+        self.assertIn("least healing", script.status_text)
+
     def test_shifter_learning_keeps_current_weapon_when_shifted_mask_is_empty(self):
         host = FakeHost()
         host.mask = 0
@@ -682,6 +914,63 @@ class ChatEventTests(unittest.TestCase):
         self.assertEqual(script.current_weapon_key, "W2")
         self.assertFalse(script.weapon_external_unknown)
         self.assertNotIn("unknown after external swap", script.status_text)
+
+    def test_shifter_recovers_previous_unknown_weapon_from_new_outgoing_signature(self):
+        host = FakeHost()
+        host.mask = 0
+        script = AutoAAScript(
+            host.client,
+            {
+                "mode": AutoAAScript.MODE_SHIFTER_WEAPON_SWAP,
+                "weapon_slot_1": "F1",
+                "weapon_slot_2": "F2",
+                "shift_slot": "F9",
+            },
+            host,
+        )
+        script.on_start()
+        script.db = hgx_data.load_character_database()
+        script.shifter_shift_state = "shifted"
+        script.current_weapon_key = "W1"
+        script._mark_external_weapon_unknown("weapon equipped")
+
+        damage = parse_chat_line_event(
+            10,
+            "[CHAT WINDOW TEXT] [Sun Apr 26 12:00:01] Starcore-StormReaper [2.0] damages Dummy : 42 (12 fire 30 physical)",
+        )
+        script.on_chat_event(damage)
+
+        self.assertEqual(script.current_weapon_key, "W1")
+        self.assertFalse(script.weapon_external_unknown)
+        self.assertEqual(script.weapon_profiles["W1"].current_signature, (6,))
+        self.assertEqual(script.weapon_profiles["W1"].observations, 1)
+
+    def test_shifter_recovers_unknown_unarmed_from_physical_only_damage(self):
+        host = FakeHost()
+        host.mask = 0
+        script = AutoAAScript(
+            host.client,
+            {
+                "mode": AutoAAScript.MODE_SHIFTER_WEAPON_SWAP,
+                "weapon_slot_1": "F1",
+                "shift_slot": "F9",
+            },
+            host,
+        )
+        script.on_start()
+        script.shifter_shift_state = "shifted"
+        script.current_weapon_key = "W1"
+        script._mark_external_weapon_unknown("weapon equipped")
+
+        damage = parse_chat_line_event(
+            10,
+            "[CHAT WINDOW TEXT] [Sun Apr 26 12:00:01] Starcore-StormReaper [2.0] damages Dummy : 30 (30 physical)",
+        )
+        script.on_chat_event(damage)
+
+        self.assertEqual(script.current_weapon_key, "Unarmed")
+        self.assertFalse(script.weapon_external_unknown)
+        self.assertIn("unarmed detected", script.status_text)
 
     def test_shifter_damage_recovery_requires_unique_learned_signature(self):
         host = FakeHost()
@@ -800,6 +1089,139 @@ class ChatEventTests(unittest.TestCase):
         self.assertEqual(host.slots, [])
         self.assertEqual(script.pending_weapon_key, "W2")
         self.assertIn("awaiting W2/F2", script.status_text)
+
+    def test_weapon_selection_uses_equal_type_model_instead_of_learned_amounts(self):
+        host = FakeHost()
+        script = AutoAAScript(
+            host.client,
+            {
+                "mode": AutoAAScript.MODE_WEAPON_SWAP,
+                "weapon_slot_1": "F1",
+                "weapon_slot_2": "F2",
+            },
+            host,
+        )
+        script.on_start()
+        script.db = hgx_data.load_character_database()
+        fire = hgx_data.DAMAGE_TYPE_NAME_TO_ID["fire"]
+        sonic = hgx_data.DAMAGE_TYPE_NAME_TO_ID["sonic"]
+        positive = hgx_data.DAMAGE_TYPE_NAME_TO_ID["positive"]
+        cold = hgx_data.DAMAGE_TYPE_NAME_TO_ID["cold"]
+        electrical = hgx_data.DAMAGE_TYPE_NAME_TO_ID["electrical"]
+        magical = hgx_data.DAMAGE_TYPE_NAME_TO_ID["magical"]
+
+        fsp_profile = script.weapon_profiles["W1"]
+        fsp_profile.stable_signature = (fire, sonic, positive)
+        fsp_profile.stable_signature_observations = 12
+        for damage_type in fsp_profile.stable_signature:
+            fsp_profile.type_estimates[damage_type] = WeaponDamageEstimate(base_estimate=900.0, observations=20)
+
+        cem_profile = script.weapon_profiles["W2"]
+        cem_profile.stable_signature = (cold, electrical, magical)
+        cem_profile.stable_signature_observations = 2
+        for damage_type in cem_profile.stable_signature:
+            cem_profile.type_estimates[damage_type] = WeaponDamageEstimate(base_estimate=1.0, observations=20)
+
+        candidates = script._weapon_candidates_for_target("Black Slaad")
+        by_key = {candidate.binding.key: candidate for candidate in candidates}
+
+        self.assertEqual(by_key["W1"].expected_damage, 26)
+        self.assertEqual(by_key["W2"].expected_damage, 43)
+        self.assertEqual(script._choose_best_weapon(candidates).binding.key, "W2")
+
+    def test_weapon_selection_actual_damage_only_conservatively_nudges_model(self):
+        host = FakeHost()
+        script = AutoAAScript(
+            host.client,
+            {
+                "mode": AutoAAScript.MODE_WEAPON_SWAP,
+                "weapon_slot_1": "F1",
+                "weapon_slot_2": "F2",
+            },
+            host,
+        )
+        script.on_start()
+        script.db = hgx_data.load_character_database()
+        fire = hgx_data.DAMAGE_TYPE_NAME_TO_ID["fire"]
+        sonic = hgx_data.DAMAGE_TYPE_NAME_TO_ID["sonic"]
+        positive = hgx_data.DAMAGE_TYPE_NAME_TO_ID["positive"]
+        cold = hgx_data.DAMAGE_TYPE_NAME_TO_ID["cold"]
+        electrical = hgx_data.DAMAGE_TYPE_NAME_TO_ID["electrical"]
+        magical = hgx_data.DAMAGE_TYPE_NAME_TO_ID["magical"]
+
+        fsp_signature = (fire, sonic, positive)
+        cem_signature = (cold, electrical, magical)
+        fsp_profile = script.weapon_profiles["W1"]
+        fsp_profile.stable_signature = fsp_signature
+        fsp_profile.stable_signature_observations = 40
+        cem_profile = script.weapon_profiles["W2"]
+        cem_profile.stable_signature = cem_signature
+        cem_profile.stable_signature_observations = 2
+
+        target_key = script._profile_target_key("Black Slaad")
+        observed_map = fsp_profile.target_damage_observations.setdefault(target_key, {})
+        for _ in range(40):
+            script._apply_observed_damage_map(observed_map, fsp_signature, 500, False)
+
+        candidates = script._weapon_candidates_for_target("Black Slaad")
+        by_key = {candidate.binding.key: candidate for candidate in candidates}
+
+        self.assertEqual(by_key["W1"].expected_damage, 26)
+        self.assertLess(by_key["W1"].selection_damage, by_key["W2"].selection_damage)
+        self.assertEqual(script._choose_best_weapon(candidates).binding.key, "W2")
+
+    def test_shifter_observed_healing_damage_uses_least_healing_instead_of_unarmed(self):
+        host = FakeHost()
+        script = AutoAAScript(
+            host.client,
+            {
+                "mode": AutoAAScript.MODE_SHIFTER_WEAPON_SWAP,
+                "weapon_slot_1": "F1",
+                "weapon_slot_2": "F2",
+                "shift_slot": "F9",
+                "current_weapon": "W1",
+            },
+            host,
+        )
+        script.on_start()
+        script.shifter_shift_state = "shifted"
+        script._observed_healing_damage_types = lambda damage_line: (4,)
+
+        def recommendation(binding, healing_score):
+            return WeaponRecommendation(
+                binding=binding,
+                expected_damage=0,
+                selection_damage=0,
+                actual_damage=None,
+                actual_observations=0,
+                matched_name="Dummy",
+                paragon_ranks=0,
+                learned_types=(4,),
+                estimated_components=((4, 100),),
+                healing_types=(4,),
+                ignored_types=(),
+                special_name="",
+                signature_observations=2,
+                estimate_observations=1,
+                healing_score=healing_score,
+            )
+
+        script._weapon_candidates_for_target = lambda name: [
+            recommendation(script.weapon_bindings["W1"], 600),
+            recommendation(script.weapon_bindings["W2"], 200),
+        ]
+
+        damage = parse_chat_line_event(
+            10,
+            "[CHAT WINDOW TEXT] [Sun Apr 26 12:00:01] Starcore-StormReaper [2.0] damages Dummy : 42 (12 cold 30 physical)",
+        )
+        self.assertTrue(script._shift_away_from_observed_healing_damage(script.weapon_profiles["W1"], damage.damage))
+
+        self.assertEqual(host.chats[:2], ["!lock opponent", "!cancel poly"])
+        self.assertEqual(script.shifter_pending_source_key, "W2")
+        self.assertFalse(script.pending_weapon_unarm)
+        self.assertFalse(script.shifter_pending_unarm)
+        self.assertIn("least healing", script.status_text)
 
     def test_weapon_mode_unarms_after_observed_healing_damage_when_no_safe_weapon_exists(self):
         host = FakeHost()

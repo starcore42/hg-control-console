@@ -42,6 +42,12 @@ WEAPON_ELEMENTAL_TYPES = frozenset({3, 4, 5, 6, 7})
 WEAPON_EXOTIC_TYPES = frozenset({8, 9, 10, 11})
 WEAPON_SIGNATURE_TYPES = frozenset(set(WEAPON_ELEMENTAL_TYPES) | set(WEAPON_EXOTIC_TYPES))
 WEAPON_ESTIMATE_TYPES = frozenset(set(WEAPON_PHYSICAL_TYPES) | set(WEAPON_SIGNATURE_TYPES))
+WEAPON_MODEL_TOTAL_DAMAGE = 120.0
+WEAPON_ACTUAL_DAMAGE_MIN_OBSERVATIONS = 4
+WEAPON_ACTUAL_DAMAGE_FULL_WEIGHT_OBSERVATIONS = 24.0
+WEAPON_ACTUAL_DAMAGE_MAX_WEIGHT = 0.25
+WEAPON_ACTUAL_DAMAGE_CLAMP_LOW = 0.50
+WEAPON_ACTUAL_DAMAGE_CLAMP_HIGH = 1.50
 P2_SPECIAL_NAME = "P2"
 MAMMONS_WRATH_SIGNATURE = tuple(sorted((
     hgx_data.DAMAGE_TYPE_NAME_TO_ID["cold"],
@@ -88,7 +94,7 @@ def _normalize_creature_name_key(text: str) -> str:
 
 WEAPON_SLOT_CHOICES = _build_quickbar_slot_choices()
 WEAPON_BASE_SLOT_CHOICES = _build_base_quickbar_slot_choices()
-WEAPON_CURRENT_CHOICES = [WEAPON_CURRENT_UNKNOWN, *WEAPON_BINDING_KEYS]
+WEAPON_CURRENT_CHOICES = [WEAPON_CURRENT_UNKNOWN, WEAPON_CURRENT_UNARMED, *WEAPON_BINDING_KEYS]
 
 
 def _parse_quickbar_slot_choice(value: object) -> Optional[Tuple[int, int]]:
@@ -895,6 +901,7 @@ class WeaponRecommendation:
     special_name: str
     signature_observations: int
     estimate_observations: int
+    healing_score: int = 0
 
 
 class ClientScriptBase:
@@ -1005,6 +1012,7 @@ class AutoDrinkScript(ClientScriptBase):
         self.drink_generation += 1
         self.lock_saved_for_recovery = False
         self.monitor_stop.set()
+        self.host.set_auto_attack_pause(False)
         self._close_process_handle()
         self.host.emit("info", f"{self.client.display_name}: AutoDrink stopped", script_id=self.script_id)
 
@@ -1227,6 +1235,7 @@ class AutoDrinkScript(ClientScriptBase):
         self.drink_generation += 1
         generation = self.drink_generation
         delay = max(float(self.config.get("cooldown_seconds", 3.0)), 0.1)
+        self.host.set_auto_attack_pause(True, "AutoDrink cooldown", ttl_seconds=delay + 0.25)
 
         def clear_after_delay():
             time.sleep(delay)
@@ -1238,6 +1247,7 @@ class AutoDrinkScript(ClientScriptBase):
                     self.host.send_chat("!action attack locked", 2)
                 except Exception as exc:
                     self.host.emit("error", f"{self.client.display_name}: !action attack locked failed: {exc}", script_id=self.script_id)
+            self.host.set_auto_attack_pause(False)
 
         threading.Thread(target=clear_after_delay, name=f"AutoDrinkCooldown-{self.client.pid}", daemon=True).start()
 
@@ -1536,6 +1546,7 @@ class AutoAAScript(ClientScriptBase):
         self.weapon_last_swap_feedback = ""
         self.weapon_external_unknown = False
         self.weapon_external_unknown_feedback = ""
+        self.weapon_external_unknown_previous_key = ""
         self.weapon_last_equipped_mask = 0
         self.weapon_equipped_key = ""
         self.weapon_equipped_keys: Tuple[str, ...] = ()
@@ -1606,6 +1617,7 @@ class AutoAAScript(ClientScriptBase):
         self.weapon_last_swap_feedback = ""
         self.weapon_external_unknown = False
         self.weapon_external_unknown_feedback = ""
+        self.weapon_external_unknown_previous_key = ""
         self.weapon_last_equipped_mask = 0
         self.weapon_equipped_key = ""
         self.weapon_equipped_keys = ()
@@ -1677,6 +1689,7 @@ class AutoAAScript(ClientScriptBase):
         self.weapon_last_swap_feedback = ""
         self.weapon_external_unknown = False
         self.weapon_external_unknown_feedback = ""
+        self.weapon_external_unknown_previous_key = ""
         self.weapon_last_equipped_mask = 0
         self.weapon_equipped_key = ""
         self.weapon_equipped_keys = ()
@@ -2496,10 +2509,15 @@ class AutoAAScript(ClientScriptBase):
 
     def _mark_external_weapon_unknown(self, feedback: str):
         self._clear_pending_weapon_state()
+        previous_key = self.current_weapon_key if self.current_weapon_key in self.weapon_profiles else ""
+        if self.current_weapon_key == WEAPON_CURRENT_UNARMED:
+            previous_key = WEAPON_CURRENT_UNARMED
         previous = self._binding_display(self.current_weapon_key)
         self.current_weapon_key = WEAPON_CURRENT_UNKNOWN
         feedback_text = str(feedback or "").strip()
         already_marked = self.weapon_external_unknown and self.weapon_external_unknown_feedback == feedback_text
+        if not self.weapon_external_unknown or not self.weapon_external_unknown_previous_key:
+            self.weapon_external_unknown_previous_key = previous_key
         self.weapon_external_unknown = True
         self.weapon_external_unknown_feedback = feedback_text
         self.set_status("Weapon state unknown after external swap")
@@ -2521,6 +2539,7 @@ class AutoAAScript(ClientScriptBase):
         feedback = self.weapon_external_unknown_feedback
         self.weapon_external_unknown = False
         self.weapon_external_unknown_feedback = ""
+        self.weapon_external_unknown_previous_key = ""
         detail = f" after {feedback}" if feedback else ""
         self.host.emit(
             "info",
@@ -2684,6 +2703,7 @@ class AutoAAScript(ClientScriptBase):
         self,
         observed_types: Set[int],
         exclude_key: str = "",
+        include_unstable: bool = False,
     ) -> Optional[WeaponLearningProfile]:
         signature = self._damage_signature(observed_types)
         if not signature:
@@ -2699,6 +2719,21 @@ class AutoAAScript(ClientScriptBase):
             return stable_matches[0]
         if stable_matches:
             return None
+
+        if include_unstable:
+            unstable_matches = [
+                profile
+                for profile in self.weapon_profiles.values()
+                if profile.binding.key != exclude_key
+                and (
+                    tuple(profile.candidate_signature) == signature
+                    or tuple(profile.current_signature) == signature
+                )
+            ]
+            if len(unstable_matches) == 1:
+                return unstable_matches[0]
+            if unstable_matches:
+                return None
 
         if self._is_shifter_weapon_mode():
             return None
@@ -2804,26 +2839,10 @@ class AutoAAScript(ClientScriptBase):
         if profile is None:
             return {}
 
-        target_key = self._profile_target_key(creature_name)
-        if not target_key:
+        signature = self._profile_signature_for_target(profile, creature_name)
+        if not signature:
             return {}
-
-        estimates = profile.target_type_estimates.get(target_key) or {}
-        components: Dict[int, float] = {}
-        for damage_type, estimate in estimates.items():
-            if damage_type not in WEAPON_ESTIMATE_TYPES:
-                continue
-            if estimate.observations <= 0:
-                continue
-            components[damage_type] = float(estimate.base_estimate)
-        if not self._profile_is_p2(profile):
-            committed_types = self._profile_known_damage_types(profile)
-            components = {
-                damage_type: base_damage
-                for damage_type, base_damage in components.items()
-                if damage_type in committed_types
-            }
-        return self._expanded_p2_component_estimates(profile, components)
+        return self._model_components_for_signature(signature)
 
     def _profile_signature_for_target(
         self,
@@ -3027,7 +3046,7 @@ class AutoAAScript(ClientScriptBase):
             return
 
         ignored_types = set(self._weapon_ignored_damage_types(profile))
-        relevant_types = set(signature) | set(WEAPON_PHYSICAL_TYPES)
+        relevant_types = set(signature)
         actual_total = 0
         saw_relevant = False
         for component in damage_line.components:
@@ -3045,33 +3064,48 @@ class AutoAAScript(ClientScriptBase):
         self._apply_observed_damage_map(observed_map, tuple(signature), actual_total, bool(is_critical))
 
     def _selection_damage_score(self, expected_damage: int, actual_damage: Optional[int], actual_observations: int) -> int:
-        if actual_damage is None or actual_observations <= 0:
+        if actual_damage is None or actual_observations < WEAPON_ACTUAL_DAMAGE_MIN_OBSERVATIONS:
             return int(expected_damage)
-        actual_weight = min(max(float(actual_observations), 0.0) / 3.0, 2.0)
+
+        observation_progress = (
+            float(actual_observations - WEAPON_ACTUAL_DAMAGE_MIN_OBSERVATIONS + 1)
+            / float(WEAPON_ACTUAL_DAMAGE_FULL_WEIGHT_OBSERVATIONS)
+        )
+        actual_weight = min(max(observation_progress, 0.0), 1.0) * float(WEAPON_ACTUAL_DAMAGE_MAX_WEIGHT)
         if actual_weight <= 0.0:
             return int(expected_damage)
-        blended = ((float(expected_damage) * 1.0) + (float(actual_damage) * float(actual_weight))) / float(1 + actual_weight)
+
+        expected_value = float(max(int(expected_damage), 0))
+        actual_value = float(max(int(actual_damage), 0))
+        if expected_value <= 0.0:
+            return int(round(actual_value * min(actual_weight, 0.10)))
+
+        bounded_actual = min(
+            max(actual_value, expected_value * float(WEAPON_ACTUAL_DAMAGE_CLAMP_LOW)),
+            expected_value * float(WEAPON_ACTUAL_DAMAGE_CLAMP_HIGH),
+        )
+        blended = (expected_value * (1.0 - actual_weight)) + (bounded_actual * actual_weight)
         return int(round(blended))
+
+    def _model_components_for_types(self, damage_types: Set[int]) -> Dict[int, float]:
+        signature_types = sorted(
+            int(damage_type)
+            for damage_type in set(damage_types or set())
+            if isinstance(damage_type, int) and damage_type in WEAPON_SIGNATURE_TYPES
+        )
+        if not signature_types:
+            return {}
+        per_type = float(WEAPON_MODEL_TOTAL_DAMAGE) / float(len(signature_types))
+        return {damage_type: per_type for damage_type in signature_types}
+
+    def _model_components_for_signature(self, signature: Tuple[int, ...]) -> Dict[int, float]:
+        return self._model_components_for_types(set(signature or ()))
 
     def _profile_component_estimates(self, profile: Optional[WeaponLearningProfile]) -> Dict[int, float]:
         if profile is None:
             return {}
 
-        components: Dict[int, float] = {}
-        for damage_type, estimate in profile.type_estimates.items():
-            if damage_type not in WEAPON_ESTIMATE_TYPES:
-                continue
-            if estimate.observations <= 0 or estimate.base_estimate <= 0.0:
-                continue
-            components[damage_type] = float(estimate.base_estimate)
-        if not self._profile_is_p2(profile):
-            committed_types = self._profile_known_damage_types(profile)
-            components = {
-                damage_type: base_damage
-                for damage_type, base_damage in components.items()
-                if damage_type in committed_types
-            }
-        return self._expanded_p2_component_estimates(profile, components)
+        return self._model_components_for_types(self._profile_known_damage_types(profile))
 
     def _is_mammons_tear_target_name(self, creature_name: str) -> bool:
         return _normalize_creature_name_key(creature_name) in MAMMONS_TEAR_TARGETS
@@ -3173,7 +3207,7 @@ class AutoAAScript(ClientScriptBase):
         if profile is None:
             return False
         has_signature_state = bool(profile.stable_signature) or self._profile_is_p2(profile)
-        return has_signature_state and bool(profile.type_estimates) and self._profile_p2_verification_complete(profile)
+        return has_signature_state and self._profile_p2_verification_complete(profile)
 
     def _format_estimated_components(self, components: Dict[int, float]) -> str:
         if not components:
@@ -3232,7 +3266,7 @@ class AutoAAScript(ClientScriptBase):
 
         components = self._profile_component_estimates(profile)
         if components:
-            parts.append("Base " + self._format_estimated_components(components))
+            parts.append("Model " + self._format_estimated_components(components))
         ignored_types = self._weapon_ignored_damage_types(profile, components)
         if ignored_types:
             parts.append(f"Ignore {self._format_ignored_damage_types(profile, ignored_types)} rider")
@@ -3503,6 +3537,28 @@ class AutoAAScript(ClientScriptBase):
                 observed_types.add(component.damage_type)
         return observed_types
 
+    def _previous_unknown_weapon_profile_for_observed_types(
+        self,
+        observed_types: Set[int],
+    ) -> Optional[WeaponLearningProfile]:
+        if not observed_types:
+            return None
+        previous_key = str(self.weapon_external_unknown_previous_key or "").strip()
+        profile = self.weapon_profiles.get(previous_key)
+        if profile is None:
+            return None
+
+        if self._observed_types_exactly_match_profile(profile, observed_types):
+            return profile
+
+        signature = self._damage_signature(observed_types)
+        if not tuple(profile.stable_signature):
+            if not tuple(profile.candidate_signature) and not tuple(profile.current_signature):
+                return profile
+            if tuple(profile.candidate_signature) == signature or tuple(profile.current_signature) == signature:
+                return profile
+        return None
+
     def _profile_for_observed_damage(
         self,
         observed_types: Set[int],
@@ -3535,6 +3591,7 @@ class AutoAAScript(ClientScriptBase):
             matching_profile = self._matching_profile_for_observed_types(
                 observed_types,
                 exclude_key=self.current_weapon_key,
+                include_unstable=self._is_shifter_weapon_mode() and self.weapon_external_unknown,
             )
             if (
                 matching_profile is not None
@@ -3549,6 +3606,17 @@ class AutoAAScript(ClientScriptBase):
                     "damage matched a learned slot",
                 )
                 return matching_profile
+            previous_profile = (
+                self._previous_unknown_weapon_profile_for_observed_types(observed_types)
+                if self._is_shifter_weapon_mode() and self.weapon_external_unknown
+                else None
+            )
+            if previous_profile is not None:
+                self._set_current_weapon_from_equipped_key(
+                    previous_profile.binding.key,
+                    "outgoing damage from previous slot",
+                )
+                return previous_profile
             return current_profile
 
         pending_profile = self.weapon_profiles.get(self.pending_weapon_key)
@@ -3962,13 +4030,6 @@ class AutoAAScript(ClientScriptBase):
         now = time.monotonic()
         observed_types = self._observed_weapon_damage_types(damage_line)
         profile = None
-        if self.weapon_external_unknown and not self.pending_weapon_key:
-            if observed_types:
-                profile = self._profile_for_observed_damage(observed_types, now, damage_line.defender)
-            if profile is None:
-                self.set_status("Weapon state unknown after external swap")
-                return
-
         if not observed_types and self._damage_line_is_physical_only(damage_line):
             if self.pending_weapon_key and not self._pending_weapon_can_accept_damage(now):
                 self._note_pending_damage_ignored(damage_line.defender, set())
@@ -3977,6 +4038,14 @@ class AutoAAScript(ClientScriptBase):
             self._confirm_unarmed_state(reason)
             self.set_status(f"{damage_line.defender}: unarmed detected")
             return
+
+        if self.weapon_external_unknown and not self.pending_weapon_key:
+            if observed_types:
+                profile = self._profile_for_observed_damage(observed_types, now, damage_line.defender)
+            if profile is None:
+                self.set_status("Weapon state unknown after external swap")
+                return
+
         if not observed_types:
             return
 
@@ -4077,6 +4146,34 @@ class AutoAAScript(ClientScriptBase):
                 )
                 return True
 
+        if self._is_shifter_weapon_mode():
+            least_healing = self._choose_least_healing_weapon(candidates)
+            if least_healing is not None:
+                least_summary = self._weapon_recommendation_summary(least_healing)
+                if least_healing.binding.key != unsafe_key:
+                    if self._request_weapon_swap(least_healing.binding, target_name, f"least healing ({healing_text})"):
+                        self.host.emit(
+                            "info",
+                            (
+                                f"{self.host.client.display_name}: {self._mode_label()} observed "
+                                f"{healing_text} healing on '{target_name}' from {self._binding_display(unsafe_key)}; "
+                                f"no safe shifter weapon exists, switching to least-healing "
+                                f"{self._binding_display(least_healing.binding.key)} ({least_summary})"
+                            ),
+                            script_id=self.script_id,
+                        )
+                        return True
+                self.set_status(
+                    f"{target_name}: no safe weapon; keep least-healing "
+                    f"{self._binding_display(least_healing.binding.key)} {least_summary}"
+                )
+                self.host.notify_state_changed()
+                return False
+
+            self.set_status(f"{target_name}: healing observed ({healing_text}); no learned shifter weapon")
+            self.host.notify_state_changed()
+            return False
+
         if self._request_unarmed_fallback(target_name, f"unarm healing ({healing_text})"):
             self.host.emit(
                 "info",
@@ -4111,22 +4208,29 @@ class AutoAAScript(ClientScriptBase):
             combat_profile.paragon_ranks,
         )
 
+    def _healing_score_for_components(self, combat_profile, components: Dict[int, float]) -> int:
+        if combat_profile is None or not components:
+            return 0
+
+        total = 0
+        for damage_type, base_damage in components.items():
+            if not isinstance(damage_type, int):
+                continue
+            if damage_type < 0 or damage_type >= len(combat_profile.healing):
+                continue
+            multiplier = int(combat_profile.healing[damage_type] or 0)
+            if multiplier == 0:
+                continue
+            total += int(round(max(float(base_damage or 0.0), 0.0) * float(multiplier)))
+        return total
+
     def _components_for_signature(
         self,
         profile: WeaponLearningProfile,
         creature_name: str,
         signature: Tuple[int, ...],
     ) -> Dict[int, float]:
-        allowed_types = set(signature) | set(WEAPON_PHYSICAL_TYPES)
-        target_components = self._profile_target_component_estimates(profile, creature_name)
-        global_components = self._profile_component_estimates(profile)
-        components: Dict[int, float] = {}
-        for damage_type in sorted(allowed_types):
-            if damage_type in target_components:
-                components[damage_type] = float(target_components[damage_type])
-            elif damage_type in global_components:
-                components[damage_type] = float(global_components[damage_type])
-        return components
+        return self._model_components_for_signature(signature)
 
     def _predict_p2_signature_components(
         self,
@@ -4137,45 +4241,9 @@ class AutoAAScript(ClientScriptBase):
         if combat_profile is None:
             return (), {}
 
-        target_components = self._profile_target_component_estimates(profile, creature_name)
-        global_components = self._profile_component_estimates(profile)
-
-        def base_for_type(damage_type: int) -> Optional[float]:
-            if damage_type in target_components:
-                return float(target_components[damage_type])
-            if damage_type in global_components:
-                return float(global_components[damage_type])
-            return None
-
-        elemental_scores = []
-        for damage_type in sorted(WEAPON_ELEMENTAL_TYPES):
-            base_damage = base_for_type(damage_type)
-            if base_damage is None:
-                continue
-            elemental_scores.append((
-                self._expected_component_damage_for_target(combat_profile, damage_type, base_damage),
-                damage_type,
-            ))
-
-        exotic_scores = []
-        for damage_type in sorted(WEAPON_EXOTIC_TYPES):
-            base_damage = base_for_type(damage_type)
-            if base_damage is None:
-                continue
-            exotic_scores.append((
-                self._expected_component_damage_for_target(combat_profile, damage_type, base_damage),
-                damage_type,
-            ))
-
-        if len(elemental_scores) >= 2 and exotic_scores:
-            elemental_scores.sort(key=lambda item: (item[0], item[1]), reverse=True)
-            exotic_scores.sort(key=lambda item: (item[0], item[1]), reverse=True)
-            signature = tuple(sorted((
-                elemental_scores[0][1],
-                elemental_scores[1][1],
-                exotic_scores[0][1],
-            )))
-            return signature, self._components_for_signature(profile, creature_name, signature)
+        generic_signature = self._generic_p2_signature_for_target(creature_name)
+        if generic_signature:
+            return generic_signature, self._model_components_for_signature(generic_signature)
 
         best_signature: Tuple[int, ...] = ()
         best_components: Dict[int, float] = {}
@@ -4183,7 +4251,7 @@ class AutoAAScript(ClientScriptBase):
         for signature in sorted(profile.signature_counts.keys()):
             if not self._is_p2_signature(signature):
                 continue
-            components = self._components_for_signature(profile, creature_name, signature)
+            components = self._model_components_for_signature(signature)
             if not components:
                 continue
             estimate = self.db.estimate_custom_damage(creature_name, components)
@@ -4245,6 +4313,7 @@ class AutoAAScript(ClientScriptBase):
                 special_name=self._special_weapon_name_for_profile(profile),
                 signature_observations=profile.stable_signature_observations,
                 estimate_observations=self._profile_estimate_observations(profile),
+                healing_score=self._healing_score_for_components(combat_profile, raw_components),
             )
 
         if not effective_components:
@@ -4274,6 +4343,7 @@ class AutoAAScript(ClientScriptBase):
             special_name=self._special_weapon_name_for_profile(profile),
             signature_observations=profile.stable_signature_observations,
             estimate_observations=self._profile_estimate_observations(profile),
+            healing_score=self._healing_score_for_components(combat_profile, raw_components),
         )
 
     def _weapon_candidates_for_target(self, creature_name: str) -> List[WeaponRecommendation]:
@@ -4295,6 +4365,7 @@ class AutoAAScript(ClientScriptBase):
             estimate = self.db.estimate_custom_damage(creature_name, effective_components)
             if estimate is None:
                 continue
+            combat_profile = self.db._resolve_combat_profile(creature_name)
             candidate_signature = self._profile_signature_for_target(profile, creature_name)
             if not candidate_signature:
                 candidate_signature = tuple(sorted(self._profile_signature_types(profile)))
@@ -4324,6 +4395,7 @@ class AutoAAScript(ClientScriptBase):
                     special_name=self._special_weapon_name_for_profile(profile),
                     signature_observations=profile.stable_signature_observations,
                     estimate_observations=self._profile_estimate_observations(profile),
+                    healing_score=self._healing_score_for_components(combat_profile, raw_components),
                 )
             )
         return candidates
@@ -4343,6 +4415,22 @@ class AutoAAScript(ClientScriptBase):
                 candidate.signature_observations,
                 len(candidate.estimated_components),
                 candidate.estimate_observations,
+                candidate.binding.key,
+            ),
+        )
+
+    def _choose_least_healing_weapon(self, candidates: List[WeaponRecommendation]) -> Optional[WeaponRecommendation]:
+        if not candidates:
+            return None
+
+        return min(
+            candidates,
+            key=lambda candidate: (
+                max(int(candidate.healing_score or 0), 0),
+                0 if candidate.binding.key == self.current_weapon_key else 1,
+                -int(candidate.selection_damage),
+                -int(candidate.expected_damage),
+                -int(candidate.actual_observations),
                 candidate.binding.key,
             ),
         )
@@ -4535,6 +4623,11 @@ class AutoAAScript(ClientScriptBase):
         return bool(result["success"])
 
     def _request_unarmed_fallback(self, target_name: str, reason: str) -> bool:
+        if self._is_shifter_weapon_mode():
+            self.set_status(f"{target_name}: no safe weapon; shifter unarm disabled")
+            self.host.notify_state_changed()
+            return False
+
         if self.pending_weapon_key and self.pending_weapon_unarm:
             self.set_status(f"{target_name}: awaiting {self._pending_weapon_display()} damage")
             self.host.notify_state_changed()
@@ -4564,9 +4657,6 @@ class AutoAAScript(ClientScriptBase):
             self.set_status(f"{target_name}: no safe weapon; unarmed source unknown")
             self.host.notify_state_changed()
             return False
-
-        if self._is_shifter_weapon_mode():
-            return self._begin_shifter_sequence(binding, target_name, reason, unarm=True)
 
         try:
             result = self.host.trigger_slot(binding.slot, page=binding.page)
@@ -4628,7 +4718,7 @@ class AutoAAScript(ClientScriptBase):
             parts.append("Types " + self._format_weapon_type_set(set(recommendation.learned_types)))
         if recommendation.estimated_components:
             parts.append(
-                "Base "
+                "Model "
                 + "/".join(
                     f"{_format_damage_type_label(damage_type)}~{amount}"
                     for damage_type, amount in recommendation.estimated_components
@@ -4640,6 +4730,9 @@ class AutoAAScript(ClientScriptBase):
                 + "/".join(_format_damage_type_label(damage_type) for damage_type in recommendation.ignored_types)
                 + " rider"
             )
+        if recommendation.healing_types:
+            healing_text = "/".join(_format_damage_type_label(damage_type) for damage_type in recommendation.healing_types)
+            parts.append(f"Heals {healing_text}~{max(int(recommendation.healing_score or 0), 0)}")
         return ", ".join(parts) if parts else "Unknown"
 
     def _request_shifter_weapon_swap(self, binding: WeaponBinding, target_name: str, reason: str) -> bool:
@@ -4711,10 +4804,21 @@ class AutoAAScript(ClientScriptBase):
         current_candidate = None
         if self._is_shifter_weapon_mode():
             current_candidate = self._current_weapon_candidate(candidates)
-            if current_candidate is None:
+            if current_candidate is None and self.current_weapon_key == WEAPON_CURRENT_UNARMED:
+                best_candidate = self._choose_least_healing_weapon(candidates)
+                recommendation = best_candidate
+                analysis["special_target_rule"] = "Current shifter weapon is unarmed; selecting the least-healing learned weapon."
+            elif current_candidate is None:
                 analysis["special_target_rule"] = "Shifter mode is holding because the current weapon is unknown."
             elif not safe_candidates:
-                analysis["special_target_rule"] = "Current shifter weapon heals this target and no configured weapon is safe."
+                best_candidate = self._choose_least_healing_weapon(candidates)
+                if best_candidate is not None and best_candidate.binding.key != current_candidate.binding.key:
+                    recommendation = best_candidate
+                    analysis["special_target_rule"] = "No configured shifter weapon is safe; selecting the least-healing weapon."
+                else:
+                    recommendation = current_candidate
+                    best_candidate = current_candidate
+                    analysis["special_target_rule"] = "No configured shifter weapon is safe; current weapon is already least-healing."
             else:
                 best_candidate = self._choose_best_weapon(safe_candidates)
                 if current_candidate.healing_types:
@@ -4922,12 +5026,23 @@ class AutoAAScript(ClientScriptBase):
             best_candidate = None
             current_candidate = None
 
+        swap_reason = "swap"
         if self._is_shifter_weapon_mode():
             if current_any_candidate is None:
-                self.set_status(f"{attack.defender}: current weapon unknown; shifter hold")
-                self.host.notify_state_changed()
-                return
-            if not current_any_candidate.healing_types:
+                if self.current_weapon_key == WEAPON_CURRENT_UNARMED:
+                    least_healing = self._choose_least_healing_weapon(candidates)
+                    if least_healing is None:
+                        self.set_status(f"{attack.defender}: unarmed; no learned shifter weapon")
+                        self.host.notify_state_changed()
+                        return
+                    recommendation = least_healing
+                    best_candidate = least_healing
+                    swap_reason = "recover unarmed"
+                else:
+                    self.set_status(f"{attack.defender}: current weapon unknown; shifter hold")
+                    self.host.notify_state_changed()
+                    return
+            elif not current_any_candidate.healing_types:
                 if self._shifter_healing_only():
                     summary = self._weapon_recommendation_summary(current_any_candidate)
                     self.set_status(
@@ -4962,13 +5077,46 @@ class AutoAAScript(ClientScriptBase):
 
                 recommendation = best_candidate
                 current_candidate = current_any_candidate
+            elif not safe_candidates:
+                least_healing = self._choose_least_healing_weapon(candidates)
+                if least_healing is None:
+                    self.set_status(f"{attack.defender}: unsafe; no learned shifter weapon")
+                    self.host.notify_state_changed()
+                    return
+                least_summary = self._weapon_recommendation_summary(least_healing)
+                if least_healing.binding.key == current_any_candidate.binding.key:
+                    self.set_status(
+                        f"{attack.defender}: no safe weapon; keep least-healing "
+                        f"{self._binding_display(current_any_candidate.binding.key)} {least_summary}"
+                    )
+                    self.host.notify_state_changed()
+                    return
+                recommendation = least_healing
+                best_candidate = least_healing
+                current_candidate = current_any_candidate
+                swap_reason = "least healing"
+            else:
+                best_candidate = self._choose_best_weapon(safe_candidates)
+                if best_candidate is None:
+                    self.set_status(f"{attack.defender}: unsafe; no safe shifter weapon")
+                    self.host.notify_state_changed()
+                    return
+                recommendation = best_candidate
+                current_candidate = current_any_candidate
+                swap_reason = "escape healing"
 
-        if not safe_candidates:
+        if not safe_candidates and not self._is_shifter_weapon_mode():
             unsafe_candidate = self._choose_best_weapon(candidates)
             healing_text = ", ".join(_format_damage_type_label(value) for value in unsafe_candidate.healing_types) if unsafe_candidate else "unknown"
             if self._request_unarmed_fallback(attack.defender, f"unarm unsafe ({healing_text})"):
                 return
             self.set_status(f"{attack.defender}: unsafe ({healing_text})")
+            return
+        if not safe_candidates and recommendation is None:
+            unsafe_candidate = self._choose_least_healing_weapon(candidates)
+            healing_text = ", ".join(_format_damage_type_label(value) for value in unsafe_candidate.healing_types) if unsafe_candidate else "unknown"
+            self.set_status(f"{attack.defender}: unsafe ({healing_text})")
+            self.host.notify_state_changed()
             return
 
         if recommendation is None:
@@ -5014,7 +5162,7 @@ class AutoAAScript(ClientScriptBase):
                 self.set_status(f"{attack.defender}: keep {self._binding_display(current_candidate.binding.key)}")
             return
 
-        if not self._request_weapon_swap(recommendation.binding, attack.defender, "swap"):
+        if not self._request_weapon_swap(recommendation.binding, attack.defender, swap_reason):
             return
 
         self.host.emit(
@@ -5599,6 +5747,15 @@ class AutoAttackScript(ClientScriptBase):
         while not self.loop_stop.is_set():
             if self.host.is_shifter_recovery_active():
                 self.set_status("Paused: shifter form recovery")
+                if self.loop_stop.wait(min(self._cooldown_seconds(), 0.50)):
+                    break
+                continue
+            if self.host.is_auto_attack_paused():
+                pause_reason = self.host.auto_attack_pause_reason or "AutoDrink cooldown"
+                if pause_reason.lower().startswith("paused"):
+                    self.set_status(pause_reason)
+                else:
+                    self.set_status(f"Paused: {pause_reason}")
                 if self.loop_stop.wait(min(self._cooldown_seconds(), 0.50)):
                     break
                 continue
@@ -6205,6 +6362,7 @@ class InGameTimersScript(ClientScriptBase):
         self.cleared_count = 0
         self.limbo_count = 0
         self.limbo_recovered_count = 0
+        self.limbo_timer_sequence = 0
 
     def on_start(self):
         super().on_start()
@@ -6222,6 +6380,7 @@ class InGameTimersScript(ClientScriptBase):
         self.cleared_count = 0
         self.limbo_count = 0
         self.limbo_recovered_count = 0
+        self.limbo_timer_sequence = 0
         rules_dir = self._rules_dir()
         self.rules = _load_status_timer_rules(rules_dir)
         self.spell_defaults = _load_hgx_spell_timer_specs(rules_dir)
@@ -6785,7 +6944,8 @@ class InGameTimersScript(ClientScriptBase):
         return killer, victim
 
     def _start_limbo_timer(self, victim: str, killer: str, now: float):
-        key = f"{self.LIMBO_SOURCE}:{self._actor_primary_key(victim)}"
+        self.limbo_timer_sequence += 1
+        key = f"{self.LIMBO_SOURCE}:{self.limbo_timer_sequence}:{self._actor_primary_key(victim)}"
         duration = self._limbo_duration_seconds()
         self.active[key] = ActiveOverlayTimer(
             label=victim,
@@ -6810,7 +6970,9 @@ class InGameTimersScript(ClientScriptBase):
         matches = [
             timer
             for timer in self.active.values()
-            if timer.source == self.LIMBO_SOURCE and self._actor_keys(timer.label).intersection(player_keys)
+            if timer.source == self.LIMBO_SOURCE
+            and timer.state != "recovered"
+            and self._actor_keys(timer.label).intersection(player_keys)
         ]
         if not matches:
             return False
@@ -6950,6 +7112,8 @@ class ClientScriptHost:
         self.last_damage_meter_error = ""
         self.shifter_recovery_until = 0.0
         self.shifter_recovery_reason = ""
+        self.auto_attack_pause_until = 0.0
+        self.auto_attack_pause_reason = ""
 
     def emit(self, level: str, message: str, script_id: Optional[str] = None):
         self.event_callback({
@@ -6995,6 +7159,26 @@ class ClientScriptHost:
                 return True
             self.shifter_recovery_until = 0.0
             self.shifter_recovery_reason = ""
+            return False
+
+    def set_auto_attack_pause(self, active: bool, reason: str = "", ttl_seconds: float = 5.0):
+        with self.lock:
+            if active:
+                self.auto_attack_pause_until = max(
+                    float(self.auto_attack_pause_until or 0.0),
+                    time.monotonic() + max(float(ttl_seconds or 0.0), 0.1),
+                )
+                self.auto_attack_pause_reason = str(reason or "Paused")
+            else:
+                self.auto_attack_pause_until = 0.0
+                self.auto_attack_pause_reason = ""
+
+    def is_auto_attack_paused(self) -> bool:
+        with self.lock:
+            if time.monotonic() < float(self.auto_attack_pause_until or 0.0):
+                return True
+            self.auto_attack_pause_until = 0.0
+            self.auto_attack_pause_reason = ""
             return False
 
     def start_script(self, definition: ScriptDefinition, config: Dict[str, object]):
