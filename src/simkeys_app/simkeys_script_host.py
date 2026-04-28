@@ -108,7 +108,6 @@ def _normalize_creature_name_key(text: str) -> str:
 
 WEAPON_SLOT_CHOICES = _build_quickbar_slot_choices()
 WEAPON_BASE_SLOT_CHOICES = _build_base_quickbar_slot_choices()
-WEAPON_CURRENT_CHOICES = [WEAPON_CURRENT_UNKNOWN, WEAPON_CURRENT_UNARMED, *WEAPON_BINDING_KEYS]
 
 
 def _parse_quickbar_slot_choice(value: object) -> Optional[Tuple[int, int]]:
@@ -8128,7 +8127,6 @@ class ScriptManager:
                     ],
                     width=20,
                 ),
-                ScriptField("current_weapon", "Cur", "choice", WEAPON_CURRENT_UNKNOWN, choices=WEAPON_CURRENT_CHOICES, width=8),
                 ScriptField("weapon_slot_1", "W1", "choice", WEAPON_SLOT_NONE, choices=WEAPON_BASE_SLOT_CHOICES, width=6),
                 ScriptField("weapon_slot_2", "W2", "choice", WEAPON_SLOT_NONE, choices=WEAPON_BASE_SLOT_CHOICES, width=6),
                 ScriptField("weapon_slot_3", "W3", "choice", WEAPON_SLOT_NONE, choices=WEAPON_BASE_SLOT_CHOICES, width=6),

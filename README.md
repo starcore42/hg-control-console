@@ -136,7 +136,8 @@ The Target Analysis panel is focused on this mode. It shows the matched `charact
 
 - At least one configured weapon slot.
 - A configured `Shift` quickbar slot used to return to form.
-- A known `Cur` value unless the script can reconcile the current weapon from later evidence.
+
+Like normal Weapon Swap, shifter mode starts with the current weapon state as `Unknown`. HGCC resolves it from later outgoing damage, authoritative equipped-slot evidence when available, and controlled swap confirmations.
 
 When a shifter swap is needed, HGCC:
 
@@ -152,8 +153,6 @@ The default shifter policy is conservative. If the current weapon is safe, HGCC 
 
 Important weapon settings:
 
-- `Cur`
-  - Current configured weapon (`W1` through `W6`) or `Unknown`.
 - `W1` through `W6`
   - Base quickbar weapon slots. Base slots are used for learned weapon bindings.
 - `Shift`

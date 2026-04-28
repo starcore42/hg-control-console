@@ -81,6 +81,47 @@ def make_bulk_app():
 
 
 class GuiSavedScriptsTests(unittest.TestCase):
+    def test_auto_damage_default_config_does_not_expose_current_weapon_selector(self):
+        manager = ScriptManager(lambda _event: None)
+        config = manager.default_config("auto_aa")
+
+        self.assertNotIn("current_weapon", config)
+
+    def test_legacy_auto_damage_current_weapon_is_removed_from_saved_defaults(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "character_defaults.user.json")
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(
+                    """{
+  "version": 3,
+  "characters": {
+    "starcore-bob": {
+      "name": "Starcore-Bob",
+      "scripts": {
+        "auto_aa": {
+          "mode": "Shifter Weapon Swap",
+          "weapon_slot_1": "F1",
+          "shift_slot": "F9",
+          "current_weapon": "W1"
+        }
+      }
+    }
+  }
+}
+"""
+                )
+            app = make_persistence_app(path)
+
+            app._load_character_defaults_store()
+            record = SimpleNamespace(pid=202, character_name="Starcore-Bob", display_name="Starcore-Bob")
+            self.assertTrue(app._auto_load_character_defaults(record))
+
+            config = app.get_script_config(202, "auto_aa")
+            self.assertEqual(config["mode"], "Shifter Weapon Swap")
+            self.assertEqual(config["weapon_slot_1"], "F1")
+            self.assertEqual(config["shift_slot"], "F9")
+            self.assertNotIn("current_weapon", config)
+
     def test_timers_default_overlay_starts_below_script_controls(self):
         manager = ScriptManager(lambda _event: None)
         config = manager.default_config("ingame_timers")

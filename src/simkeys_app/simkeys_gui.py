@@ -16,7 +16,6 @@ from .simkeys_script_host import (
     OVERLAY_SCRIPT_CONTROLS,
     ScriptManager,
     WEAPON_BASE_SLOT_CHOICES,
-    WEAPON_CURRENT_UNKNOWN,
     WEAPON_SLOT_NONE,
 )
 
@@ -684,8 +683,6 @@ class ScriptCard:
         for index in range(1, 7):
             config[f"weapon_slot_{index}"] = selected[index - 1] if index <= len(selected) else WEAPON_SLOT_NONE
 
-        config["current_weapon"] = WEAPON_CURRENT_UNKNOWN
-
         mode = str(config.get("mode", "")).strip()
         if validate_for_start and mode in AUTO_DAMAGE_WEAPON_MODES:
             max_bindings = _weapon_mode_limit(mode)
@@ -823,7 +820,7 @@ class ScriptCard:
             if is_shifter:
                 self.mode_hint_var.set(
                     f"{mode} learns weapon damage from combat and unshifts for initial learning, healing avoidance, or a safe weapon that beats the Shift Gain threshold. "
-                    f"Select up to {max_bindings} base weapon buttons and the quickbar button that shifts back into form."
+                    f"Select up to {max_bindings} base weapon buttons and the quickbar button that shifts back into form. The starting weapon is assumed Unknown and reconciled from combat."
                 )
                 self.weapon_limit_var.set(
                     "Shifter flow: lock the current target, !cancel poly, wait for Player Hide, swap the weapon, then retry the shift slot once per second until the form is confirmed. Enable Heal Only to ignore damage gain and keep the old healing-only behavior."
@@ -901,7 +898,7 @@ class ScriptCard:
                 )
             elif mode == AutoAAScript.MODE_SHIFTER_WEAPON_SWAP:
                 self.weapon_limit_var.set(
-                    "Shifter mode unshifts for healing avoidance, initial learning, or a safe weapon above Shift Gain %, then uses the Shift slot until a shift message or essence line confirms the form."
+                    "Shifter mode starts Unknown, learns from outgoing damage, and unshifts only for healing avoidance, initial learning, or a safe weapon above Shift Gain %. It then uses the Shift slot until a shift message or essence line confirms the form."
                 )
             else:
                 self.weapon_limit_var.set(
