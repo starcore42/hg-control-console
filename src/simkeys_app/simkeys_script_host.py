@@ -844,6 +844,7 @@ class ScriptDefinition:
     description: str
     fields: List[ScriptField]
     factory: Callable
+    details: str = ""
 
 
 @dataclass
@@ -8084,6 +8085,11 @@ class ScriptManager:
                 ScriptField("echo_console", "Echo", "bool", True),
             ],
             factory=AutoDrinkScript,
+            details=(
+                "AutoDrink watches the injected client's HP directly and uses the chosen potion slot whenever health drops "
+                "below the configured threshold. It can lock the current target before drinking and then resume attacking "
+                "after the potion cooldown so the character gets back into combat with minimal manual cleanup."
+            ),
         )
         self.registry[autodrink.script_id] = autodrink
 
@@ -8104,6 +8110,11 @@ class ScriptManager:
                 ScriptField("include_backlog", "Backlog", "bool", False),
             ],
             factory=StopHittingScript,
+            details=(
+                "Stop Hitting is a safety guard for targets that should not be damaged further, such as entries marked "
+                '`kickback=\"Area\"` in `characters.d`. When it sees your character damage one of those targets, it drinks '
+                "the configured potion to interrupt attacking and deliberately does not resume combat afterward."
+            ),
         )
         self.registry[stop_hitting.script_id] = stop_hitting
 
@@ -8147,6 +8158,11 @@ class ScriptManager:
                 ScriptField("include_backlog", "Backlog", "bool", False),
             ],
             factory=AutoAAScript,
+            details=(
+                "Auto Damage reads combat log output to keep ranged damage automation or weapon swapping aligned with the "
+                "current target. Depending on the selected mode, it can fire HG action commands, learn weapon damage "
+                "profiles over time, avoid healing targets, and swap to the safest or strongest configured option."
+            ),
         )
         self.registry[auto_aa.script_id] = auto_aa
 
@@ -8159,6 +8175,11 @@ class ScriptManager:
                 ScriptField("cooldown_seconds", "Cooldown", "float", 6.2, minimum=0.1, maximum=30.0, step=0.1, width=6),
             ],
             factory=AutoActionScript,
+            details=(
+                "Auto Action repeatedly sends one selected HG action command against the current opponent on a fixed "
+                "cooldown. It is a lightweight helper for abilities like Called Shot, Knockdown, or Disarm and does not "
+                "need combat-log parsing to run."
+            ),
         )
         self.registry[auto_action.script_id] = auto_action
 
@@ -8170,6 +8191,11 @@ class ScriptManager:
                 ScriptField("cooldown_seconds", "Cooldown", "float", 3.0, minimum=0.1, maximum=30.0, step=0.1, width=6),
             ],
             factory=AutoAttackScript,
+            details=(
+                "Auto Attack makes every client running it continually try to attack the target of the character assigned "
+                "as lead. Use `Set Selected as Lead` on the chosen lead character first, then start Auto Attack on the "
+                "followers; the lead itself should not have Auto Attack started."
+            ),
         )
         self.registry[auto_attack.script_id] = auto_attack
 
@@ -8193,6 +8219,11 @@ class ScriptManager:
                 ScriptField("include_backlog", "Backlog", "bool", False),
             ],
             factory=AlwaysOnScript,
+            details=(
+                "Basic Functions is the background utility bundle for day-to-day play. It listens for follow cue phrases, "
+                "refreshes the Zerial wallet when you enter the workshop, fills the spellbook after resting, and disables "
+                "fog on area transitions, with each helper available as an individual toggle."
+            ),
         )
         self.registry[always_on.script_id] = always_on
 
@@ -8219,6 +8250,11 @@ class ScriptManager:
                 ScriptField("include_backlog", "Backlog", "bool", False),
             ],
             factory=AutoCombatModeScript,
+            details=(
+                "Auto Combat Mode keeps a chosen attack mode turned on while the character is actively fighting. Rapid "
+                "Shot is tracked through NWN memory, while the other supported modes are inferred from outgoing attack "
+                "lines and retried after the configured cooldown whenever the mode drops."
+            ),
         )
         self.registry[auto_rsm.script_id] = auto_rsm
 
@@ -8242,6 +8278,11 @@ class ScriptManager:
                 ScriptField("include_backlog", "Backlog", "bool", False),
             ],
             factory=InGameTimersScript,
+            details=(
+                "In-Game Timers renders an overlay inside the NWN client using status and cooldown rules loaded from the "
+                "configured rules directory. It can track fixed and variable timers, self-cast spell durations, limbo "
+                "timers for party-style actors, and rest or death cleanup for rules that should clear automatically."
+            ),
         )
         self.registry[ingame_timers.script_id] = ingame_timers
 

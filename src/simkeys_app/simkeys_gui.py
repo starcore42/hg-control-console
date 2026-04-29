@@ -288,9 +288,10 @@ class ScriptCard:
         self.body.columnconfigure(0, weight=1)
         self.body.grid(row=1, column=1, sticky="ew")
 
+        description_text = str(getattr(definition, "details", "") or definition.description or "").strip()
         self.description_label = ttk.Label(
             self.body,
-            text=definition.description,
+            text=description_text,
             justify="left",
             wraplength=560,
         )
