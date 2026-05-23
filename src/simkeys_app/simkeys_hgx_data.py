@@ -778,9 +778,15 @@ def load_character_database(source_dir: Optional[str] = None) -> HgxCharacterDat
                     if damage_type is None:
                         continue
 
-                    immunity[damage_type] = _parse_optional_int(damage_node.get("immunity"))
-                    resistance[damage_type] = _parse_optional_int(damage_node.get("resistance"))
-                    healing[damage_type] = _parse_optional_int(damage_node.get("healing"))
+                    parsed_immunity = _parse_optional_int(damage_node.get("immunity"))
+                    parsed_resistance = _parse_optional_int(damage_node.get("resistance"))
+                    parsed_healing = _parse_optional_int(damage_node.get("healing"))
+                    if parsed_immunity is not None:
+                        immunity[damage_type] = parsed_immunity
+                    if parsed_resistance is not None:
+                        resistance[damage_type] = parsed_resistance
+                    if parsed_healing is not None:
+                        healing[damage_type] = parsed_healing
 
             records[name] = CreatureRecord(
                 name=name,

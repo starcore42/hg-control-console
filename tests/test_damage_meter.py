@@ -381,6 +381,49 @@ class DamageMeterTests(unittest.TestCase):
         self.assertTrue(any("Damage elements:" in line for line in breakdown_lines))
         self.assertTrue(all(len(line) <= meter.MAX_CHAT_LINE_LENGTH for line in net_lines + healing_lines + breakdown_lines))
 
+    def test_character_loader_preserves_duplicate_partial_damage_entries(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with open(os.path.join(tmpdir, "test.xml"), "w", encoding="utf-8") as handle:
+                handle.write(
+                    """<characters>
+  <creature name="Kickback Dummy">
+    <damageImmunities>
+      <damage type="Acid" immunity="100" resistance="7" />
+      <damage type="Acid" kickback="true" />
+      <damage type="Magical" immunity="100" resistance="0" />
+      <damage type="Magical" kickback="true" />
+    </damageImmunities>
+  </creature>
+</characters>
+"""
+                )
+
+            db = hgx_data.load_character_database(tmpdir)
+            stats = db.effective_stats("Kickback Dummy")
+
+        acid_type = hgx_data.DAMAGE_TYPE_NAME_TO_ID["acid"]
+        magical_type = hgx_data.DAMAGE_TYPE_NAME_TO_ID["magical"]
+
+        self.assertEqual(stats.immunity[acid_type], 100)
+        self.assertEqual(stats.resistance[acid_type], 7)
+        self.assertEqual(stats.immunity[magical_type], 100)
+        self.assertEqual(stats.resistance[magical_type], 0)
+
+    def test_default_pit_fiend_data_keeps_acid_immunity_for_arcane_archer(self):
+        db = hgx_data.load_character_database(hgx_data.default_character_data_dir())
+        profile = db._resolve_combat_profile("Pit Fiend")
+        acid_type = hgx_data.DAMAGE_TYPE_NAME_TO_ID["acid"]
+        magical_type = hgx_data.DAMAGE_TYPE_NAME_TO_ID["magical"]
+
+        self.assertIsNotNone(profile)
+        self.assertEqual(profile.immunity[acid_type], 100)
+        self.assertEqual(profile.immunity[magical_type], 100)
+
+        recommendation = db.recommend_arcane_archer_damage("Pit Fiend", 10)
+
+        self.assertEqual(recommendation.selection_name, "cold")
+        self.assertEqual(recommendation.command, "!damco")
+
     def test_default_character_data_sbikta_heals_on_cold(self):
         db = hgx_data.load_character_database(hgx_data.default_character_data_dir())
         profile = db._resolve_combat_profile("Sbikta")
