@@ -1003,6 +1003,41 @@ class ClientScriptBase:
     def get_state_details(self) -> dict:
         return {}
 
+    def _character_name(self) -> str:
+        live_name = (self.host.client.character_name or "").strip()
+        if live_name:
+            return live_name
+        cached_name = (self.client.character_name or "").strip()
+        if cached_name:
+            return cached_name
+        return ""
+
+    def _actor_compare_keys(self, value: object) -> Set[str]:
+        text = hgx_combat.normalize_actor_name(str(value or "")).lower()
+        text = re.sub(r"\s+", " ", text).strip()
+        if not text:
+            return set()
+        keys = {text}
+        without_suffix = re.sub(r"\s*\[[^\]]+\]\s*$", "", text).strip()
+        if without_suffix:
+            keys.add(without_suffix)
+        return keys
+
+    def _actor_is_self(self, actor_name: object) -> bool:
+        actor_keys = self._actor_compare_keys(actor_name)
+        if not actor_keys:
+            return False
+        own_keys: Set[str] = set()
+        for value in (
+            self._character_name(),
+            getattr(self.client, "character_name", ""),
+            getattr(self.host.client, "character_name", ""),
+            getattr(self.client, "display_name", ""),
+            getattr(self.host.client, "display_name", ""),
+        ):
+            own_keys.update(self._actor_compare_keys(value))
+        return bool(actor_keys.intersection(own_keys))
+
 
 class AutoDrinkScript(ClientScriptBase):
     script_id = "autodrink"
@@ -1423,15 +1458,6 @@ class StopHittingScript(ClientScriptBase):
             self.host.send_console(
                 f"HGCC stop-hitting {record.name}: drank {trigger_name} after {self.last_damage_summary}"
             )
-
-    def _character_name(self) -> str:
-        live_name = (self.host.client.character_name or "").strip()
-        if live_name:
-            return live_name
-        cached_name = (self.client.character_name or "").strip()
-        if cached_name:
-            return cached_name
-        return ""
 
     def _damage_summary(self, damage_line) -> str:
         parts = [f"{component.amount} {component.type_name}" for component in damage_line.components]
@@ -1906,41 +1932,6 @@ class AutoAAScript(ClientScriptBase):
                     f"({recommendation.command}) rc={result['rc']} err={result['err']}"
                 )
             )
-
-    def _character_name(self) -> str:
-        live_name = (self.host.client.character_name or "").strip()
-        if live_name:
-            return live_name
-        cached_name = (self.client.character_name or "").strip()
-        if cached_name:
-            return cached_name
-        return ""
-
-    def _actor_compare_keys(self, value: object) -> Set[str]:
-        text = hgx_combat.normalize_actor_name(str(value or "")).lower()
-        text = re.sub(r"\s+", " ", text).strip()
-        if not text:
-            return set()
-        keys = {text}
-        without_suffix = re.sub(r"\s*\[[^\]]+\]\s*$", "", text).strip()
-        if without_suffix:
-            keys.add(without_suffix)
-        return keys
-
-    def _actor_is_self(self, actor_name: object) -> bool:
-        actor_keys = self._actor_compare_keys(actor_name)
-        if not actor_keys:
-            return False
-        own_keys: Set[str] = set()
-        for value in (
-            self._character_name(),
-            getattr(self.client, "character_name", ""),
-            getattr(self.host.client, "character_name", ""),
-            getattr(self.client, "display_name", ""),
-            getattr(self.host.client, "display_name", ""),
-        ):
-            own_keys.update(self._actor_compare_keys(value))
-        return bool(actor_keys.intersection(own_keys))
 
     def _reset_shifter_runtime(self, clear_observed: bool = False):
         self.shifter_swap_stage = ""
@@ -5881,6 +5872,7 @@ class AutoActionScript(ClientScriptBase):
         "Called Shot": ("!action cs opponent", "Called Shot"),
         "Knockdown": ("!action kd opponent", "Knockdown"),
         "Disarm": ("!action dis opponent", "Disarm"),
+        "Taunt": ("!action attack+tau opponent", "Taunt"),
     }
 
     def __init__(self, client, config: Dict[str, object], host):
@@ -5889,9 +5881,35 @@ class AutoActionScript(ClientScriptBase):
         self.loop_thread = None
         self.loop_stop = threading.Event()
         self.last_error_key = ""
+        self.last_combat_at = 0.0
+        self.combat_timeout = 6.0
+        self.db = hgx_data.load_default_database()
 
     def needs_chat_feed(self) -> bool:
-        return False
+        return True
+
+    def chat_event_types(self) -> Tuple[str, ...]:
+        return ("attack", "damage")
+
+    def on_chat_event(self, event: ChatLineEvent):
+        if not self.enabled:
+            return
+
+        attacker = ""
+        defender = ""
+        if event.attack:
+            attacker = event.attack.attacker
+            defender = event.attack.defender
+        elif event.damage:
+            attacker = event.damage.attacker
+            defender = event.damage.defender
+
+        if attacker and self._actor_is_self(attacker):
+            if self.db.lookup(defender) is not None:
+                self.last_combat_at = time.monotonic()
+
+    def on_chat_line(self, sequence: int, text: str):
+        pass
 
     def on_start(self):
         super().on_start()
@@ -5922,11 +5940,20 @@ class AutoActionScript(ClientScriptBase):
 
     def _run_loop(self):
         while not self.loop_stop.is_set():
+            now = time.monotonic()
+            if now - self.last_combat_at > self.combat_timeout:
+                self.set_status("Waiting for combat")
+                if self.loop_stop.wait(0.50):
+                    break
+                continue
+
             if self.host.is_shifter_recovery_active():
                 self.set_status("Paused: shifter form recovery")
                 if self.loop_stop.wait(min(self._cooldown_seconds(), 0.50)):
                     break
                 continue
+
+            self.set_status(f"Running: {self._mode_label()}")
             command = self._command_text()
             try:
                 result = self.host.send_chat(command, 2)
@@ -6519,15 +6546,6 @@ class AutoCombatModeScript(ClientScriptBase):
             self.set_status(f"{mode} active")
             return True
         return False
-
-    def _character_name(self) -> str:
-        live_name = (self.host.client.character_name or "").strip()
-        if live_name:
-            return live_name
-        cached_name = (self.client.character_name or "").strip()
-        if cached_name:
-            return cached_name
-        return ""
 
     def _close_process_handle(self):
         handle = self.process_handle
@@ -8171,7 +8189,7 @@ class ScriptManager:
             name="Auto Action",
             description="Repeatedly issue the selected combat action on its cooldown.",
             fields=[
-                ScriptField("mode", "Mode", "choice", "Called Shot", choices=["Called Shot", "Knockdown", "Disarm"], width=12),
+                ScriptField("mode", "Mode", "choice", "Called Shot", choices=["Called Shot", "Knockdown", "Disarm", "Taunt"], width=12),
                 ScriptField("cooldown_seconds", "Cooldown", "float", 6.2, minimum=0.1, maximum=30.0, step=0.1, width=6),
             ],
             factory=AutoActionScript,
