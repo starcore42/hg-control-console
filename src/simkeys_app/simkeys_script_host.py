@@ -5885,7 +5885,6 @@ class AutoActionScript(ClientScriptBase):
         self.loop_stop = threading.Event()
         self.last_error_key = ""
         self.last_combat_at = 0.0
-        self.combat_timeout = 6.0
         self.db = hgx_data.load_default_database()
 
     def needs_chat_feed(self) -> bool:
@@ -5944,7 +5943,7 @@ class AutoActionScript(ClientScriptBase):
     def _run_loop(self):
         while not self.loop_stop.is_set():
             now = time.monotonic()
-            if now - self.last_combat_at > self.combat_timeout:
+            if now - self.last_combat_at > self._cooldown_seconds():
                 self.set_status("Waiting for combat")
                 if self.loop_stop.wait(0.50):
                     break
