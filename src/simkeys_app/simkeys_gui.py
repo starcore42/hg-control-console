@@ -12,6 +12,7 @@ from . import simkeys_damage_meter as damage_meter
 from . import simkeys_runtime as runtime
 from .simkeys_script_host import (
     AutoAAScript,
+    CoordinateFollowScript,
     DEFAULT_TIMER_OVERLAY_OFFSET_Y,
     OVERLAY_SCRIPT_CONTROLS,
     ScriptManager,
@@ -21,8 +22,11 @@ from .simkeys_script_host import (
 
 
 BASIC_FUNCTIONS_SCRIPT_ID = "always_on"
+COORDINATE_FOLLOW_SCRIPT_ID = "coordinate_follow"
 TIMERS_SCRIPT_ID = "ingame_timers"
 DEFAULT_AUTO_START_SCRIPT_IDS = (BASIC_FUNCTIONS_SCRIPT_ID, TIMERS_SCRIPT_ID)
+CLIENT_PANE_DEFAULT_WIDTH = 430
+CLIENT_PANE_MIN_WIDTH = 360
 
 
 def _probe_error_is_busy(text):
@@ -38,6 +42,69 @@ def _probe_error_is_busy(text):
         or "all pipe instances are busy" in lowered
         or "pipe busy" in lowered
     )
+
+
+class Tooltip:
+    def __init__(self, widget, text, delay_ms=350):
+        self.widget = widget
+        self.text = str(text or "").strip()
+        self.delay_ms = int(delay_ms)
+        self.after_id = None
+        self.window = None
+        if not self.text:
+            return
+        widget.bind("<Enter>", self.schedule, add="+")
+        widget.bind("<Leave>", self.hide, add="+")
+        widget.bind("<ButtonPress>", self.hide, add="+")
+        widget.bind("<FocusIn>", self.schedule, add="+")
+        widget.bind("<FocusOut>", self.hide, add="+")
+
+    def schedule(self, _event=None):
+        self.cancel()
+        self.after_id = self.widget.after(self.delay_ms, self.show)
+
+    def cancel(self):
+        if self.after_id is not None:
+            try:
+                self.widget.after_cancel(self.after_id)
+            except tk.TclError:
+                pass
+            self.after_id = None
+
+    def show(self):
+        self.after_id = None
+        if self.window is not None or not self.text:
+            return
+        try:
+            x = self.widget.winfo_rootx() + 18
+            y = self.widget.winfo_rooty() + self.widget.winfo_height() + 8
+            self.window = tk.Toplevel(self.widget)
+            self.window.wm_overrideredirect(True)
+            self.window.wm_geometry(f"+{x}+{y}")
+            label = tk.Label(
+                self.window,
+                text=self.text,
+                justify="left",
+                background="#fff8dc",
+                foreground="#212529",
+                relief="solid",
+                borderwidth=1,
+                padx=8,
+                pady=5,
+                wraplength=320,
+            )
+            label.pack()
+        except tk.TclError:
+            self.window = None
+
+    def hide(self, _event=None):
+        self.cancel()
+        if self.window is not None:
+            try:
+                self.window.destroy()
+            except tk.TclError:
+                pass
+            self.window = None
 
 
 SCRIPT_CARD_LAYOUTS = {
@@ -71,10 +138,18 @@ SCRIPT_CARD_LAYOUTS = {
         ],
         "advanced": [],
     },
+    "coordinate_follow": {
+        "expanded": False,
+        "sections": [
+            ("Follow", ["follow_interval_seconds", "distance_threshold", "formation_radius", "bypass_no_walk", "combat_grace_seconds"]),
+        ],
+        "advanced_title": "Debug / Advanced",
+        "advanced": ["position_poll_interval", "lead_stale_seconds", "poll_interval", "max_lines", "echo_console", "include_backlog"],
+    },
     "always_on": {
         "expanded": False,
         "sections": [
-            ("Follow", ["cooldown_seconds"]),
+            ("Assist", ["cooldown_seconds"]),
             ("Disable", ["disable_follow", "disable_wallet", "disable_spellbook_fill", "disable_fog_off"]),
         ],
         "advanced": ["follow_cues_dir", "poll_interval", "max_lines", "echo_console", "include_backlog"],
@@ -101,6 +176,7 @@ SCRIPT_CARD_ACCENTS = {
     "auto_aa": "#00a878",
     "auto_action": "#f59f00",
     "auto_attack": "#d9480f",
+    "coordinate_follow": "#0b7285",
     "always_on": "#087f5b",
     "auto_rsm": "#7950f2",
     "ingame_timers": "#1971c2",
@@ -218,6 +294,8 @@ class ScriptCard:
         self.expanded = bool(SCRIPT_CARD_LAYOUTS.get(definition.script_id, {}).get("expanded", False))
         self.advanced_expanded = False
         self.loaded_client_pid = None
+        self.loading_config = False
+        self.config_apply_after_id = None
 
         self.frame = ttk.Frame(parent, padding=(0, 8))
         self.frame.columnconfigure(1, weight=1)
@@ -227,7 +305,6 @@ class ScriptCard:
 
         header = ttk.Frame(self.frame)
         header.grid(row=0, column=1, sticky="ew")
-        header.columnconfigure(3, weight=1)
 
         accent_color = SCRIPT_CARD_ACCENTS.get(definition.script_id, "#868e96")
         self.icon_label = tk.Label(
@@ -254,11 +331,25 @@ class ScriptCard:
         )
         self.auto_start_check.grid(row=0, column=2, padx=(12, 0), sticky="w")
 
+        status_column = 3
+        if self.definition.script_id == COORDINATE_FOLLOW_SCRIPT_ID:
+            self.coordinate_saved_lead_var = tk.BooleanVar(value=False)
+            self.coordinate_saved_lead_check = ttk.Checkbutton(
+                header,
+                text="Lead",
+                variable=self.coordinate_saved_lead_var,
+                command=self.on_coordinate_saved_lead_changed,
+            )
+            self.coordinate_saved_lead_check.grid(row=0, column=3, padx=(8, 0), sticky="w")
+            self.extra_controls.append(("bool", self.coordinate_saved_lead_check))
+            status_column = 4
+
+        header.columnconfigure(status_column, weight=1)
         self.status_var = tk.StringVar(value="Stopped")
         self.status_label = ttk.Label(header, textvariable=self.status_var)
-        self.status_label.grid(row=0, column=3, padx=(12, 10), sticky="w")
+        self.status_label.grid(row=0, column=status_column, padx=(12, 10), sticky="w")
 
-        next_column = 4
+        next_column = status_column + 1
         if self.definition.script_id == "auto_aa":
             self._create_header_mode_control(header, next_column, on_change=self.on_auto_damage_mode_changed)
             next_column += 2
@@ -275,6 +366,27 @@ class ScriptCard:
             )
             self.lead_button.grid(row=0, column=next_column, padx=(0, 8), sticky="e")
             self.extra_controls.append(("button", self.lead_button))
+            next_column += 1
+
+        if self.definition.script_id == COORDINATE_FOLLOW_SCRIPT_ID:
+            self.coordinate_lead_button = ttk.Button(
+                header,
+                text="Start Lead",
+                command=self.on_start_coordinate_lead,
+                width=12,
+            )
+            self.coordinate_lead_button.grid(row=0, column=next_column, padx=(0, 6), sticky="e")
+            self.extra_controls.append(("button", self.coordinate_lead_button))
+            next_column += 1
+
+            self.coordinate_follower_button = ttk.Button(
+                header,
+                text="Start Follower",
+                command=self.on_start_coordinate_follower,
+                width=14,
+            )
+            self.coordinate_follower_button.grid(row=0, column=next_column, padx=(0, 8), sticky="e")
+            self.extra_controls.append(("button", self.coordinate_follower_button))
             next_column += 1
 
         self.expand_button = ttk.Button(header, text="", command=self.on_expand_toggle, width=12)
@@ -315,6 +427,8 @@ class ScriptCard:
     def _toggle_button_text(self, running: bool) -> str:
         if self.definition.script_id == "stop_hitting":
             return "Stop Guard" if running else "Start Guard"
+        if self.definition.script_id == COORDINATE_FOLLOW_SCRIPT_ID:
+            return "Stop Coordinate Follow" if running else "Stopped"
         action = "Stop" if running else "Start"
         return f"{action} {self.definition.name}"
 
@@ -322,6 +436,7 @@ class ScriptCard:
         field = self.fields_by_key["mode"]
         ttk.Label(parent, text=f"{field.label}:").grid(row=0, column=column, padx=(0, 4), sticky="e")
         var = tk.StringVar(value=str(field.default))
+        self._trace_config_var(var)
         widget = ttk.Combobox(
             parent,
             textvariable=var,
@@ -337,6 +452,16 @@ class ScriptCard:
     def _build_generic_content(self):
         layout = SCRIPT_CARD_LAYOUTS.get(self.definition.script_id, {"sections": [], "advanced": []})
         row = 0
+        if self.definition.script_id == COORDINATE_FOLLOW_SCRIPT_ID:
+            self.coordinate_runtime_var = tk.StringVar(value="Current coordinates: <unknown>")
+            runtime_frame = ttk.LabelFrame(self.content, text="Coordinates", padding=8)
+            runtime_frame.grid(row=row, column=0, sticky="ew", pady=(0, 8))
+            runtime_frame.columnconfigure(0, weight=1)
+            runtime_label = ttk.Label(runtime_frame, textvariable=self.coordinate_runtime_var, justify="left", wraplength=520)
+            runtime_label.grid(row=0, column=0, sticky="ew")
+            self.wrap_targets.append((runtime_label, 48))
+            row += 1
+
         for title, field_keys in layout.get("sections", []):
             section = ttk.LabelFrame(self.content, text=title, padding=8)
             section.grid(row=row, column=0, sticky="ew", pady=(0, 8))
@@ -345,6 +470,7 @@ class ScriptCard:
 
         advanced_keys = layout.get("advanced", [])
         if advanced_keys:
+            advanced_title = layout.get("advanced_title", "Advanced")
             self.advanced_toggle_var = tk.StringVar(value="Show Advanced")
             ttk.Button(
                 self.content,
@@ -354,7 +480,7 @@ class ScriptCard:
             ).grid(row=row, column=0, sticky="w")
             row += 1
 
-            self.advanced_body = ttk.LabelFrame(self.content, text="Advanced", padding=8)
+            self.advanced_body = ttk.LabelFrame(self.content, text=advanced_title, padding=8)
             self.advanced_body.grid(row=row, column=0, sticky="ew", pady=(8, 0))
             self._build_field_grid(self.advanced_body, advanced_keys, columns=min(max(len(advanced_keys), 1), 2))
             if not self.advanced_expanded:
@@ -445,6 +571,7 @@ class ScriptCard:
         for slot in range(1, 13):
             choice = f"F{slot}"
             var = tk.BooleanVar(value=False)
+            self._trace_config_var(var)
             widget = ttk.Checkbutton(grid, variable=var, command=self.on_weapon_slots_changed)
             widget.grid(row=1, column=slot, padx=1, pady=1, sticky="w")
             self.weapon_slot_vars[choice] = (var, widget)
@@ -478,13 +605,29 @@ class ScriptCard:
         field = self.fields_by_key[field_key]
         holder = ttk.Frame(parent)
         holder.grid(row=row, column=column, sticky="nw", padx=(0, 14), pady=(0, 8))
-        ttk.Label(holder, text=field.label).grid(row=0, column=0, sticky="w")
+        label_row = ttk.Frame(holder)
+        label_row.grid(row=0, column=0, sticky="w")
+        ttk.Label(label_row, text=field.label).grid(row=0, column=0, sticky="w")
+        help_text = str(getattr(field, "help_text", "") or "").strip()
+        if help_text:
+            help_label = tk.Label(
+                label_row,
+                text="?",
+                width=2,
+                cursor="question_arrow",
+                foreground="#0b7285",
+                font=("Segoe UI", 8, "bold"),
+            )
+            help_label.grid(row=0, column=1, padx=(4, 0), sticky="w")
+            Tooltip(help_label, help_text)
 
         if field.kind == "bool":
             var = tk.BooleanVar(value=bool(field.default))
+            self._trace_config_var(var)
             widget = ttk.Checkbutton(holder, variable=var)
         elif field.kind == "choice":
             var = tk.StringVar(value=str(field.default))
+            self._trace_config_var(var)
             widget = ttk.Combobox(
                 holder,
                 textvariable=var,
@@ -494,6 +637,7 @@ class ScriptCard:
             )
         else:
             var = tk.StringVar(value=str(field.default))
+            self._trace_config_var(var)
             widget = ttk.Entry(holder, textvariable=var, width=field.width)
 
         widget.grid(row=1, column=0, sticky="w")
@@ -506,17 +650,45 @@ class ScriptCard:
         for widget, padding in self.wrap_targets:
             widget.configure(wraplength=max(width - padding, 220))
 
+    def _trace_config_var(self, var):
+        var.trace_add("write", self.on_config_value_changed)
+
+    def on_config_value_changed(self, *_args):
+        if self.loading_config or self.loaded_client_pid is None:
+            return
+        if self.config_apply_after_id is not None:
+            try:
+                self.frame.after_cancel(self.config_apply_after_id)
+            except tk.TclError:
+                pass
+        self.config_apply_after_id = self.frame.after(450, self.apply_pending_config_change)
+
+    def apply_pending_config_change(self):
+        self.config_apply_after_id = None
+        if self.loading_config or self.loaded_client_pid is None:
+            return
+        try:
+            config = self.parse_config(validate_for_start=False)
+        except Exception as exc:
+            self.status_var.set(f"Invalid setting: {exc}")
+            return
+        self.app.apply_script_config_change(self.loaded_client_pid, self.definition.script_id, config)
+
     def grid(self, **kwargs):
         self.frame.grid(**kwargs)
 
     def load_for_client(self, client_pid):
         self.loaded_client_pid = client_pid
-        self.auto_start_var.set(self.app.get_script_autostart(client_pid, self.definition.script_id))
-        config = self.app.get_script_config(client_pid, self.definition.script_id)
-        if self.definition.script_id == "auto_aa":
-            self._load_auto_damage_config(config)
-        else:
-            self._load_standard_config(config)
+        self.loading_config = True
+        try:
+            self.auto_start_var.set(self.app.get_script_autostart(client_pid, self.definition.script_id))
+            config = self.app.get_script_config(client_pid, self.definition.script_id)
+            if self.definition.script_id == "auto_aa":
+                self._load_auto_damage_config(config)
+            else:
+                self._load_standard_config(config)
+        finally:
+            self.loading_config = False
         self.refresh_state()
 
     def try_persist_for_client(self, client_pid):
@@ -550,6 +722,8 @@ class ScriptCard:
                 var.set(bool(value))
             else:
                 var.set(str(value))
+        if self.definition.script_id == COORDINATE_FOLLOW_SCRIPT_ID and hasattr(self, "coordinate_saved_lead_var"):
+            self.coordinate_saved_lead_var.set(self.app._coordinate_follow_config_is_lead(config))
 
     def _load_auto_damage_config(self, config):
         for key in (
@@ -635,6 +809,10 @@ class ScriptCard:
                 config[field.key] = parsed
             else:
                 config[field.key] = str(value)
+        if self.definition.script_id == COORDINATE_FOLLOW_SCRIPT_ID:
+            lead_var = getattr(self, "coordinate_saved_lead_var", None)
+            saved_as_lead = bool(lead_var.get()) if lead_var is not None else False
+            config["role"] = CoordinateFollowScript.ROLE_LEAD if saved_as_lead else CoordinateFollowScript.ROLE_FOLLOWER
         return config
 
     def _parse_auto_damage_config(self, validate_for_start=True):
@@ -714,8 +892,54 @@ class ScriptCard:
         self.toggle_button.configure(text=self._toggle_button_text(state["running"]))
         if busy_label:
             self.toggle_button.configure(state="disabled")
+        if self.definition.script_id == COORDINATE_FOLLOW_SCRIPT_ID:
+            self._refresh_coordinate_follow_buttons(state, busy_label)
+            self._refresh_coordinate_follow_runtime_details(state)
         if self.definition.script_id == "auto_aa":
             self._refresh_auto_damage_runtime_details(state.get("details", {}), state["running"])
+
+    def _refresh_coordinate_follow_buttons(self, state, busy_label):
+        if not hasattr(self, "coordinate_lead_button"):
+            return
+        busy = bool(busy_label)
+        running = bool(state.get("running"))
+        start_state = "disabled" if busy else "normal"
+        stop_state = "disabled" if busy or not running else "normal"
+        self.coordinate_lead_button.configure(state=start_state, text="Restart Lead" if running else "Start Lead")
+        self.coordinate_follower_button.configure(state=start_state, text="Restart Follower" if running else "Start Follower")
+        self.toggle_button.configure(state=stop_state)
+        if self.loaded_client_pid is not None and hasattr(self, "coordinate_saved_lead_var"):
+            config = self.app.get_script_config(self.loaded_client_pid, COORDINATE_FOLLOW_SCRIPT_ID)
+            self.coordinate_saved_lead_var.set(self.app._coordinate_follow_config_is_lead(config))
+
+    def _refresh_coordinate_follow_runtime_details(self, state):
+        if not hasattr(self, "coordinate_runtime_var"):
+            return
+        client = self.app.selected_client()
+        if client is None:
+            self.coordinate_runtime_var.set("Current coordinates: <unknown>")
+            return
+        if getattr(client, "position_valid", False):
+            current = f"{client.position_x:.2f}, {client.position_y:.2f}, {client.position_z:.2f}"
+        else:
+            current = "<unknown>"
+        details = state.get("details") or {}
+        saved_role = ""
+        if self.loaded_client_pid is not None:
+            saved_config = self.app.get_script_config(self.loaded_client_pid, COORDINATE_FOLLOW_SCRIPT_ID)
+            saved_role = str(saved_config.get("role") or "").strip()
+        runtime_role = str(details.get("role") or "").strip()
+        lines = [
+            f"Current coordinates: {current}",
+            f"Saved role: {saved_role or 'Follower'}",
+        ]
+        if state.get("running"):
+            lines.append(f"Runtime role: {runtime_role or 'Follower'}")
+            lead_name = str(details.get("last_lead_name") or "").strip() or "<waiting>"
+            lines.append(f"Lead: {lead_name} at {details.get('last_lead_position') or '<unknown>'}")
+            lines.append(f"Move target: {details.get('last_target_position') or '<unknown>'}")
+            lines.append(f"Bypass active: {'Yes' if details.get('walk_bypass_active') else 'No'}")
+        self.coordinate_runtime_var.set("\n".join(lines))
 
     def _refresh_auto_damage_runtime_details(self, details, running):
         if not hasattr(self, "weapon_learning_var"):
@@ -916,6 +1140,28 @@ class ScriptCard:
             bool(self.auto_start_var.get()),
         )
 
+    def on_coordinate_saved_lead_changed(self):
+        if self.loaded_client_pid is None:
+            return
+        enabled = bool(self.coordinate_saved_lead_var.get())
+        config = self._current_coordinate_follow_config_for_role_change(enabled)
+        self.app.set_coordinate_follow_saved_lead(
+            self.loaded_client_pid,
+            enabled,
+            config=config,
+            enable_saved=enabled,
+        )
+        if enabled:
+            self.auto_start_var.set(True)
+
+    def _current_coordinate_follow_config_for_role_change(self, enabled):
+        try:
+            config = self.parse_config(validate_for_start=False)
+        except Exception:
+            config = self.app.get_script_config(self.loaded_client_pid, COORDINATE_FOLLOW_SCRIPT_ID)
+        config["role"] = CoordinateFollowScript.ROLE_LEAD if enabled else CoordinateFollowScript.ROLE_FOLLOWER
+        return config
+
     def on_toggle(self):
         try:
             config = self.parse_config()
@@ -923,6 +1169,23 @@ class ScriptCard:
             messagebox.showerror("HGCC", str(exc))
             return
         self.app.toggle_script(self.definition.script_id, config)
+
+    def on_start_coordinate_lead(self):
+        self._start_coordinate_follow_role(CoordinateFollowScript.ROLE_LEAD)
+
+    def on_start_coordinate_follower(self):
+        self._start_coordinate_follow_role(CoordinateFollowScript.ROLE_FOLLOWER)
+
+    def _start_coordinate_follow_role(self, role):
+        try:
+            config = self.parse_config()
+        except Exception as exc:
+            messagebox.showerror("HGCC", str(exc))
+            return
+        config["role"] = role
+        if hasattr(self, "coordinate_saved_lead_var"):
+            self.coordinate_saved_lead_var.set(role == CoordinateFollowScript.ROLE_LEAD)
+        self.app.start_script(self.definition.script_id, config)
 
     def on_assign_lead(self):
         self.app.assign_auto_attack_lead_async()
@@ -1009,11 +1272,25 @@ class SimKeysDesktopApp:
         if script_id not in self.script_manager.registry or not isinstance(config, dict):
             return {}
         allowed = set(self.script_manager.default_config(script_id).keys())
-        return {
+        cleaned = {
             key: value
             for key, value in dict(config).items()
             if key in allowed
         }
+        if script_id == COORDINATE_FOLLOW_SCRIPT_ID:
+            try:
+                distance = float(cleaned.get("distance_threshold", CoordinateFollowScript.DEFAULT_DISTANCE_THRESHOLD))
+            except (TypeError, ValueError):
+                distance = CoordinateFollowScript.DEFAULT_DISTANCE_THRESHOLD
+            if abs(distance - 0.75) < 0.0001 or abs(distance - 0.10) < 0.0001:
+                cleaned["distance_threshold"] = CoordinateFollowScript.DEFAULT_DISTANCE_THRESHOLD
+            if "distance_threshold" not in cleaned:
+                cleaned["distance_threshold"] = CoordinateFollowScript.DEFAULT_DISTANCE_THRESHOLD
+            if "formation_radius" not in cleaned:
+                cleaned["formation_radius"] = CoordinateFollowScript.DEFAULT_FORMATION_RADIUS
+            if "bypass_no_walk" not in cleaned:
+                cleaned["bypass_no_walk"] = True
+        return cleaned
 
     def _load_character_defaults_store(self):
         self.character_script_configs = {}
@@ -1058,6 +1335,21 @@ class SimKeysDesktopApp:
                         offset_y = 0
                     if str(cleaned_config.get("position") or "TR").upper() == "TR" and offset_y == 0:
                         cleaned_config["offset_y"] = DEFAULT_TIMER_OVERLAY_OFFSET_Y
+                if payload_version < 5 and script_id == COORDINATE_FOLLOW_SCRIPT_ID:
+                    try:
+                        distance = float(cleaned_config.get("distance_threshold", CoordinateFollowScript.DEFAULT_DISTANCE_THRESHOLD))
+                    except (TypeError, ValueError):
+                        distance = CoordinateFollowScript.DEFAULT_DISTANCE_THRESHOLD
+                    if abs(distance - 0.0) < 0.0001 or abs(distance - 0.75) < 0.0001 or abs(distance - 0.10) < 0.0001:
+                        cleaned_config["distance_threshold"] = CoordinateFollowScript.DEFAULT_DISTANCE_THRESHOLD
+                    try:
+                        radius = float(cleaned_config.get("formation_radius", CoordinateFollowScript.DEFAULT_FORMATION_RADIUS))
+                    except (TypeError, ValueError):
+                        radius = CoordinateFollowScript.DEFAULT_FORMATION_RADIUS
+                    if abs(radius - 0.0) < 0.0001 or abs(radius - 4.0) < 0.0001:
+                        cleaned_config["formation_radius"] = CoordinateFollowScript.DEFAULT_FORMATION_RADIUS
+                    if not bool(cleaned_config.get("bypass_no_walk", False)):
+                        cleaned_config["bypass_no_walk"] = True
                 cleaned[script_id] = cleaned_config
 
             auto_start = entry.get("auto_start", [])
@@ -1089,7 +1381,7 @@ class SimKeysDesktopApp:
             self.character_display_names[normalized] = name
 
     def _save_character_defaults_store(self):
-        payload = {"version": 3, "characters": {}}
+        payload = {"version": 5, "characters": {}}
         character_keys = (
             set(self.character_script_configs.keys())
             | set(self.character_script_autostart.keys())
@@ -1130,7 +1422,7 @@ class SimKeysDesktopApp:
 
     def _save_character_defaults_for_client(self, client_pid):
         client = self.clients_by_pid.get(client_pid)
-        if client is None or not client.character_name:
+        if client is None or not getattr(client, "character_name", None):
             return False
 
         character_key = self._normalize_character_key(client.character_name)
@@ -1226,13 +1518,19 @@ class SimKeysDesktopApp:
         paned = ttk.Panedwindow(outer, orient="horizontal")
         paned.grid(row=1, column=0, sticky="nsew")
         self.main_paned = paned
+        paned.bind("<Configure>", self._on_main_paned_event)
+        paned.bind("<ButtonRelease-1>", self._on_main_paned_event)
 
         left = ttk.Frame(paned, padding=(0, 0, 10, 0))
         left.columnconfigure(0, weight=1)
         left.rowconfigure(1, weight=1)
         paned.add(left, weight=1)
 
-        ttk.Label(left, text="Discovered Clients").grid(row=0, column=0, sticky="w", pady=(0, 6))
+        client_header = ttk.Frame(left)
+        client_header.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 6))
+        client_header.columnconfigure(0, weight=1)
+        ttk.Label(client_header, text="Discovered Clients").grid(row=0, column=0, sticky="w")
+        ttk.Label(client_header, text="|| Drag divider", foreground="#6c757d").grid(row=0, column=1, sticky="e")
         self.client_tree = ttk.Treeview(
             left,
             columns=("ord", "pid", "injected", "name", "window", "started", "scripts"),
@@ -1672,10 +1970,27 @@ class SimKeysDesktopApp:
     def _set_initial_pane_sizes(self):
         try:
             if self.main_paned.winfo_width() > 0:
-                self.main_paned.sashpos(0, 430)
+                self.main_paned.sashpos(0, CLIENT_PANE_DEFAULT_WIDTH)
+                self._enforce_main_paned_min_width()
         except tk.TclError:
             pass
         self.refresh_scroll_regions()
+
+    def _on_main_paned_event(self, _event=None):
+        self.root.after_idle(self._enforce_main_paned_min_width)
+
+    def _enforce_main_paned_min_width(self):
+        try:
+            if self.main_paned is None or not self.main_paned.winfo_exists():
+                return
+            width = int(self.main_paned.winfo_width())
+            if width <= 1:
+                return
+            minimum = min(CLIENT_PANE_MIN_WIDTH, max(width - 240, 120))
+            if self.main_paned.sashpos(0) < minimum:
+                self.main_paned.sashpos(0, minimum)
+        except tk.TclError:
+            pass
 
     def _on_details_resize(self, event):
         self.details_label.configure(wraplength=max(int(event.width) - 24, 240))
@@ -2072,6 +2387,11 @@ class SimKeysDesktopApp:
                     record.character_name = previous.character_name
                 if record.player_object == 0:
                     record.player_object = previous.player_object
+                if not getattr(record, "position_valid", False) and getattr(previous, "position_valid", False):
+                    record.position_valid = previous.position_valid
+                    record.position_x = previous.position_x
+                    record.position_y = previous.position_y
+                    record.position_z = previous.position_z
                 if record.identity_error == 0:
                     record.identity_error = previous.identity_error
                 if record.query is None:
@@ -2193,9 +2513,14 @@ class SimKeysDesktopApp:
             return
 
         self.selected_name_var.set(f"#{client.ordinal} {client.display_name}")
+        position_text = (
+            f"({client.position_x:.2f}, {client.position_y:.2f}, {client.position_z:.2f})"
+            if getattr(client, "position_valid", False)
+            else "<unknown>"
+        )
         detail_lines = [
             f"PID: {client.pid}    Injected: {'Yes' if client.injected else 'No'}    Scripts: {self.script_manager.running_script_count(client.pid)}",
-            f"Character: {client.character_name or '<unknown>'}    Player Object: 0x{client.player_object:08X}",
+            f"Character: {client.character_name or '<unknown>'}    Player Object: 0x{client.player_object:08X}    Position: {position_text}",
             f"Window: {client.window_title or '<untitled>'}",
             f"Class: {client.window_class or '<unknown>'}    HWND: 0x{client.hwnd:08X}    Thread: {client.thread_id}",
             f"Started: {client.created_text}    Identity Error: {client.identity_error}",
@@ -2225,8 +2550,113 @@ class SimKeysDesktopApp:
         return dict(config)
 
     def set_script_config(self, client_pid, script_id, config):
-        self.script_configs[(client_pid, script_id)] = self._clean_script_config(script_id, config)
+        cleaned = self._clean_script_config(script_id, config)
+        self.script_configs[(client_pid, script_id)] = cleaned
+        if script_id == COORDINATE_FOLLOW_SCRIPT_ID and self._coordinate_follow_config_is_lead(cleaned):
+            self._enforce_coordinate_follow_lead_config(client_pid)
         self._save_character_defaults_for_client(client_pid)
+
+    def apply_script_config_change(self, client_pid, script_id, config):
+        cleaned = self._clean_script_config(script_id, config)
+        current = self.get_script_config(client_pid, script_id)
+        if cleaned == current:
+            return False
+
+        client = self.clients_by_pid.get(client_pid)
+        state = self.script_manager.get_state(client_pid, script_id)
+        was_running = bool(state.get("running"))
+        runtime_role = None
+        if script_id == COORDINATE_FOLLOW_SCRIPT_ID and was_running:
+            runtime_role = str((state.get("details") or {}).get("role") or "").strip()
+
+        self.set_script_config(client_pid, script_id, cleaned)
+        if client is None or not getattr(client, "injected", False) or not was_running:
+            return True
+
+        restart_config = dict(cleaned)
+        if script_id == COORDINATE_FOLLOW_SCRIPT_ID and runtime_role:
+            restart_config["role"] = runtime_role
+        toggle_key = (client_pid, script_id)
+        if toggle_key in self.script_toggles_in_progress:
+            self.log(f"{client.display_name}: {script_id} settings saved; restart skipped because the script is already changing state", "info")
+            return True
+        self.toggle_script_for_client(
+            client,
+            script_id,
+            restart_config,
+            source="GUI",
+            force_start=True,
+            persist_config=False,
+        )
+        return True
+
+    def set_coordinate_follow_saved_lead(self, client_pid, enabled, config=None, enable_saved=False):
+        if config is None:
+            config = self.get_script_config(client_pid, COORDINATE_FOLLOW_SCRIPT_ID)
+        else:
+            config = self._clean_script_config(COORDINATE_FOLLOW_SCRIPT_ID, config)
+        config["role"] = CoordinateFollowScript.ROLE_LEAD if enabled else CoordinateFollowScript.ROLE_FOLLOWER
+        if enable_saved and enabled:
+            self.script_autostart[(client_pid, COORDINATE_FOLLOW_SCRIPT_ID)] = True
+        self.set_script_config(client_pid, COORDINATE_FOLLOW_SCRIPT_ID, config)
+        return dict(config)
+
+    def _coordinate_follow_config_is_lead(self, config):
+        role = str((config or {}).get("role", "") or "").strip().lower()
+        return role == CoordinateFollowScript.ROLE_LEAD.lower()
+
+    def _enforce_coordinate_follow_lead_config(self, lead_pid):
+        changed_pids = set()
+        lead_pid = int(lead_pid)
+
+        for (pid, script_id), config in list(self.script_configs.items()):
+            if script_id != COORDINATE_FOLLOW_SCRIPT_ID or int(pid) == lead_pid:
+                continue
+            if not self._coordinate_follow_config_is_lead(config):
+                continue
+            demoted = dict(config)
+            demoted["role"] = CoordinateFollowScript.ROLE_FOLLOWER
+            self.script_configs[(pid, script_id)] = self._clean_script_config(script_id, demoted)
+            changed_pids.add(pid)
+
+        basic_key = (lead_pid, BASIC_FUNCTIONS_SCRIPT_ID)
+        basic_config = self.get_script_config(lead_pid, BASIC_FUNCTIONS_SCRIPT_ID)
+        if not bool(basic_config.get("disable_follow", False)):
+            basic_config["disable_follow"] = True
+            self.script_configs[basic_key] = self._clean_script_config(BASIC_FUNCTIONS_SCRIPT_ID, basic_config)
+            changed_pids.add(lead_pid)
+
+        for pid in changed_pids:
+            self._save_character_defaults_for_client(pid)
+
+    def _prepare_coordinate_follow_lead_runtime(self, lead_pid):
+        lead_pid = int(lead_pid)
+        self._enforce_coordinate_follow_lead_config(lead_pid)
+        messages = []
+        for pid in list(self.script_manager.hosts.keys()):
+            if int(pid) == lead_pid:
+                continue
+            state = self.script_manager.get_state(pid, COORDINATE_FOLLOW_SCRIPT_ID)
+            details = state.get("details") or {}
+            if not state.get("running") or str(details.get("role") or "").lower() != CoordinateFollowScript.ROLE_LEAD.lower():
+                continue
+
+            client = self.clients_by_pid.get(pid)
+            display_name = client.display_name if client is not None else f"pid={pid}"
+            follower_config = self.get_script_config(pid, COORDINATE_FOLLOW_SCRIPT_ID)
+            follower_config["role"] = CoordinateFollowScript.ROLE_FOLLOWER
+            self.script_configs[(pid, COORDINATE_FOLLOW_SCRIPT_ID)] = self._clean_script_config(
+                COORDINATE_FOLLOW_SCRIPT_ID,
+                follower_config,
+            )
+            self._save_character_defaults_for_client(pid)
+            self.script_manager.stop_script(pid, COORDINATE_FOLLOW_SCRIPT_ID)
+            if client is not None and getattr(client, "injected", False):
+                self.script_manager.start_script(client, COORDINATE_FOLLOW_SCRIPT_ID, follower_config)
+                messages.append(f"{display_name}: demoted to Coordinate Follow follower")
+            else:
+                messages.append(f"{display_name}: stopped old Coordinate Follow lead")
+        return messages
 
     def get_script_autostart(self, client_pid, script_id):
         key = (client_pid, script_id)
@@ -2301,6 +2731,7 @@ class SimKeysDesktopApp:
             already_running = 0
             skipped_clients = []
             errors = []
+            coordinate_lead_pid = self._resolve_saved_coordinate_follow_lead(clients)
 
             for client in clients:
                 script_ids = self.get_script_autostart_ids(client.pid)
@@ -2317,7 +2748,16 @@ class SimKeysDesktopApp:
                         already_running += 1
                         continue
                     try:
-                        self.script_manager.start_script(client, script_id, self.get_script_config(client.pid, script_id))
+                        config = self.get_script_config(client.pid, script_id)
+                        if script_id == COORDINATE_FOLLOW_SCRIPT_ID:
+                            config = dict(config)
+                            if client.pid == coordinate_lead_pid:
+                                config["role"] = CoordinateFollowScript.ROLE_LEAD
+                                self._prepare_coordinate_follow_lead_runtime(client.pid)
+                            elif self._coordinate_follow_config_is_lead(config):
+                                config["role"] = CoordinateFollowScript.ROLE_FOLLOWER
+                                self.set_script_config(client.pid, script_id, config)
+                        self.script_manager.start_script(client, script_id, config)
                         started.append(f"{client.display_name}: {definition.name}")
                     except Exception as exc:
                         errors.append(f"{client.display_name}: {definition.name}: {exc}")
@@ -2334,6 +2774,22 @@ class SimKeysDesktopApp:
             return "; ".join(parts) if parts else "No saved scripts were selected."
 
         self.run_background("Start Saved Scripts", action)
+
+    def _resolve_saved_coordinate_follow_lead(self, clients):
+        lead_pid = None
+        for client in clients:
+            if COORDINATE_FOLLOW_SCRIPT_ID not in self.get_script_autostart_ids(client.pid):
+                continue
+            config = self.get_script_config(client.pid, COORDINATE_FOLLOW_SCRIPT_ID)
+            if not self._coordinate_follow_config_is_lead(config):
+                continue
+            if lead_pid is None:
+                lead_pid = client.pid
+                continue
+            config = dict(config)
+            config["role"] = CoordinateFollowScript.ROLE_FOLLOWER
+            self.set_script_config(client.pid, COORDINATE_FOLLOW_SCRIPT_ID, config)
+        return lead_pid
 
     def stop_all_scripts_async(self):
         self.persist_loaded_configs(self.selected_pid)
@@ -2471,12 +2927,21 @@ class SimKeysDesktopApp:
 
         self.toggle_script_for_client(client, script_id, config, source="GUI")
 
-    def toggle_script_for_client(self, client, script_id, config, source="GUI"):
+    def start_script(self, script_id, config):
+        client = self.selected_client()
+        if client is None or not client.injected:
+            messagebox.showwarning("HGCC", "Select an injected client first.")
+            return
+
+        self.toggle_script_for_client(client, script_id, config, source="GUI", force_start=True)
+
+    def toggle_script_for_client(self, client, script_id, config, source="GUI", force_start=False, persist_config=True):
         if client is None or not getattr(client, "injected", False):
             self.log(f"{source}: select an injected client first.", "error")
             return
 
-        self.set_script_config(client.pid, script_id, config)
+        if persist_config:
+            self.set_script_config(client.pid, script_id, config)
         toggle_key = (client.pid, script_id)
         if toggle_key in self.script_toggles_in_progress:
             self.log(f"{client.display_name}: {script_id} is already changing state", "info")
@@ -2485,28 +2950,42 @@ class SimKeysDesktopApp:
             return
 
         state = self.script_manager.get_state(client.pid, script_id)
-        starting = not state["running"]
-        self.script_toggles_in_progress[toggle_key] = "Starting..." if starting else "Stopping..."
+        restarting = bool(force_start and state["running"])
+        starting = bool(force_start or not state["running"])
+        busy_text = "Restarting..." if restarting else ("Starting..." if starting else "Stopping...")
+        self.script_toggles_in_progress[toggle_key] = busy_text
 
         row = self.script_rows.get(script_id) if client.pid == self.selected_pid else None
         if row is not None:
-            row.status_var.set("Starting..." if starting else "Stopping...")
-            row.toggle_button.configure(state="disabled", text="Starting..." if starting else "Stopping...")
+            row.status_var.set(busy_text)
+            row.toggle_button.configure(state="disabled", text=busy_text)
+            if hasattr(row, "coordinate_lead_button"):
+                row.coordinate_lead_button.configure(state="disabled")
+                row.coordinate_follower_button.configure(state="disabled")
 
         def action():
             try:
                 script_name = self.script_manager.registry[script_id].name
                 current_state = self.script_manager.get_state(client.pid, script_id)
                 if current_state["running"]:
+                    if not force_start:
+                        self.script_manager.stop_script(client.pid, script_id)
+                        if source == "Overlay":
+                            self._send_ingame_echo(client, f"HGCC: {script_name} off")
+                        return f"{client.display_name}: stopped {script_id}"
                     self.script_manager.stop_script(client.pid, script_id)
-                    if source == "Overlay":
-                        self._send_ingame_echo(client, f"HGCC: {script_name} off")
-                    return f"{client.display_name}: stopped {script_id}"
+
+                lead_messages = []
+                if script_id == COORDINATE_FOLLOW_SCRIPT_ID and self._coordinate_follow_config_is_lead(config):
+                    lead_messages = self._prepare_coordinate_follow_lead_runtime(client.pid)
 
                 self.script_manager.start_script(client, script_id, config)
                 if source == "Overlay":
                     self._send_ingame_echo(client, f"HGCC: {script_name} on")
-                return f"{client.display_name}: started {script_id}"
+                message = f"{client.display_name}: {'restarted' if restarting else 'started'} {script_id}"
+                if lead_messages:
+                    message += "; " + "; ".join(lead_messages)
+                return message
             finally:
                 self.enqueue_event({
                     "type": "script-toggle-finished",

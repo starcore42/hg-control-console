@@ -96,6 +96,10 @@ class ClientRecord:
     injected: bool
     character_name: str
     player_object: int
+    position_valid: bool
+    position_x: float
+    position_y: float
+    position_z: float
     identity_error: int
     query: Optional[dict]
     probe_error: str
@@ -373,6 +377,10 @@ def probe_client(pid: int, pipe_timeout_ms: int = 125) -> ClientRecord:
     injected = False
     character_name = ""
     player_object = 0
+    position_valid = False
+    position_x = 0.0
+    position_y = 0.0
+    position_z = 0.0
     identity_error = 0
     query = None
     probe_error = ""
@@ -384,6 +392,10 @@ def probe_client(pid: int, pipe_timeout_ms: int = 125) -> ClientRecord:
             injected = True
             character_name = query.get("character_name", "")
             player_object = int(query.get("player_object", 0))
+            position_valid = bool(query.get("position_valid", False))
+            position_x = float(query.get("position_x", 0.0) or 0.0)
+            position_y = float(query.get("position_y", 0.0) or 0.0)
+            position_z = float(query.get("position_z", 0.0) or 0.0)
             identity_error = int(query.get("identity_error", 0))
         finally:
             pipe.close()
@@ -403,6 +415,10 @@ def probe_client(pid: int, pipe_timeout_ms: int = 125) -> ClientRecord:
         injected=injected,
         character_name=character_name,
         player_object=player_object,
+        position_valid=position_valid,
+        position_x=position_x,
+        position_y=position_y,
+        position_z=position_z,
         identity_error=identity_error,
         query=query,
         probe_error=probe_error,
@@ -421,9 +437,14 @@ def format_client_line(record: ClientRecord) -> str:
     injected_text = "yes" if record.injected else "no"
     name = record.character_name or "-"
     title = record.window_title or "-"
+    position = (
+        f" pos=({record.position_x:.1f},{record.position_y:.1f},{record.position_z:.1f})"
+        if getattr(record, "position_valid", False)
+        else ""
+    )
     return (
         f"[{record.ordinal}] pid={record.pid} injected={injected_text} "
-        f"name={name!r} title={title!r} started={record.created_text}"
+        f"name={name!r} title={title!r}{position} started={record.created_text}"
     )
 
 
@@ -537,6 +558,38 @@ def send_chat(record_or_pid, text: str, mode: int = 2):
     pipe = open_pipe(record_or_pid)
     try:
         return simkeys.chat_send(pipe, text, mode)
+    finally:
+        pipe.close()
+
+
+def move_to_location(
+    record_or_pid,
+    x: float,
+    y: float,
+    z: float,
+    client_side: bool = True,
+    action_object_id: int = 0x7F000000,
+    bypass_no_walk: bool = False,
+):
+    pipe = open_pipe(record_or_pid)
+    try:
+        return simkeys.move_to_location(
+            pipe,
+            x,
+            y,
+            z,
+            client_side=1 if client_side else 0,
+            action_object_id=action_object_id,
+            bypass_no_walk=bypass_no_walk,
+        )
+    finally:
+        pipe.close()
+
+
+def set_walk_bypass(record_or_pid, enabled: bool):
+    pipe = open_pipe(record_or_pid)
+    try:
+        return simkeys.set_walk_bypass(pipe, enabled)
     finally:
         pipe.close()
 

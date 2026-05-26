@@ -1,6 +1,7 @@
 import os
 import threading
 import time
+import math
 import ctypes as C
 import ctypes.wintypes as W
 import re
@@ -232,6 +233,7 @@ OVERLAY_SCRIPT_CONTROLS: Tuple[Tuple[str, str], ...] = (
     ("auto_aa", "Dg"),
     ("auto_action", "Ac"),
     ("auto_attack", "At"),
+    ("coordinate_follow", "Cf"),
     ("always_on", "BF"),
     ("auto_rsm", "Md"),
     ("ingame_timers", "Tm"),
@@ -835,6 +837,7 @@ class ScriptField:
     maximum: Optional[float] = None
     step: Optional[float] = None
     width: int = 8
+    help_text: str = ""
 
 
 @dataclass
@@ -6074,7 +6077,7 @@ class AutoAttackScript(ClientScriptBase):
 
 class AutoFollowScript(ClientScriptBase):
     script_id = "auto_follow"
-    script_label = "Auto Follow"
+    script_label = "Auto Assist"
     DEFAULT_FOLLOW_CUES = ("fall in", "follow me", "follow my")
     ASO_COMMAND = "!action aso target"
 
@@ -6097,12 +6100,12 @@ class AutoFollowScript(ClientScriptBase):
         self.last_speaker = ""
         self.last_message = ""
         self.last_error_key = ""
-        self.set_status(f"Listening for {len(self.follow_cues)} follow cues")
+        self.set_status(f"Listening for {len(self.follow_cues)} assist cues")
         self.host.emit(
             "info",
             (
                 f"{self.host.client.display_name}: {self.script_label} started "
-                f"with {len(self.follow_cues)} follow cues from {self._follow_cues_dir()}"
+                f"with {len(self.follow_cues)} assist cues from {self._follow_cues_dir()}"
             ),
             script_id=self.script_id,
         )
@@ -6144,7 +6147,7 @@ class AutoFollowScript(ClientScriptBase):
             target_result = self.host.send_chat(tell_command, 2)
         except Exception as exc:
             self.cooldown_until = now + 1.0
-            self.set_status(f"{speaker}: follow failed")
+            self.set_status(f"{speaker}: assist failed")
             self.host.emit(
                 "error",
                 f"{self.host.client.display_name}: {self.script_label} chat send failed for '{speaker}': {exc}",
@@ -6158,12 +6161,12 @@ class AutoFollowScript(ClientScriptBase):
         self.last_message = message
         success = bool(aso_result["success"] and target_result["success"])
         if success:
-            self.set_status(f"{speaker}: followed")
+            self.set_status(f"{speaker}: assisted")
             if self.last_error_key:
                 self.host.emit("info", f"{self.host.client.display_name}: {self.script_label} recovered", script_id=self.script_id)
                 self.last_error_key = ""
         else:
-            self.set_status(f"{speaker}: follow failed")
+            self.set_status(f"{speaker}: assist failed")
             self.last_error_key = f"{aso_result['rc']}:{aso_result['err']}:{target_result['rc']}:{target_result['err']}"
 
         self.host.emit(
@@ -6223,12 +6226,437 @@ class AutoFollowScript(ClientScriptBase):
 
     def get_state_details(self) -> dict:
         return {
-            "follow_cues": len(self.follow_cues),
-            "follow_cues_dir": self._follow_cues_dir(),
-            "follow_count": self.follow_count,
+            "assist_cues": len(self.follow_cues),
+            "assist_cues_dir": self._follow_cues_dir(),
+            "assist_count": self.follow_count,
             "last_speaker": self.last_speaker,
             "last_message": self.last_message,
         }
+
+
+@dataclass(frozen=True)
+class CoordinateLeadSnapshot:
+    pid: int
+    name: str
+    x: float
+    y: float
+    z: float
+    updated_at: float
+
+
+@dataclass(frozen=True)
+class CoordinateClientSnapshot:
+    pid: int
+    name: str
+    role: str
+    x: float
+    y: float
+    z: float
+    updated_at: float
+
+
+class CoordinateFollowRegistry:
+    def __init__(self):
+        self.lock = threading.RLock()
+        self.lead: Optional[CoordinateLeadSnapshot] = None
+        self.clients: Dict[int, CoordinateClientSnapshot] = {}
+
+    def publish(self, pid: int, name: str, position: Tuple[float, float, float]) -> CoordinateLeadSnapshot:
+        snapshot = CoordinateLeadSnapshot(
+            pid=int(pid),
+            name=str(name or "").strip(),
+            x=float(position[0]),
+            y=float(position[1]),
+            z=float(position[2]),
+            updated_at=time.monotonic(),
+        )
+        with self.lock:
+            self.lead = snapshot
+            self._publish_client_locked(snapshot.pid, snapshot.name, CoordinateFollowScript.ROLE_LEAD, position, snapshot.updated_at)
+        return snapshot
+
+    def publish_client(self, pid: int, name: str, role: str, position: Tuple[float, float, float]) -> CoordinateClientSnapshot:
+        now = time.monotonic()
+        with self.lock:
+            return self._publish_client_locked(int(pid), name, role, position, now)
+
+    def _publish_client_locked(
+        self,
+        pid: int,
+        name: str,
+        role: str,
+        position: Tuple[float, float, float],
+        updated_at: float,
+    ) -> CoordinateClientSnapshot:
+        snapshot = CoordinateClientSnapshot(
+            pid=int(pid),
+            name=str(name or "").strip(),
+            role=str(role or "").strip(),
+            x=float(position[0]),
+            y=float(position[1]),
+            z=float(position[2]),
+            updated_at=float(updated_at),
+        )
+        self.clients[snapshot.pid] = snapshot
+        return snapshot
+
+    def clear(self, pid: int):
+        with self.lock:
+            self.clients.pop(int(pid), None)
+            if self.lead is not None and self.lead.pid == int(pid):
+                self.lead = None
+
+    def is_lead(self, pid: int) -> bool:
+        with self.lock:
+            return self.lead is not None and self.lead.pid == int(pid)
+
+    def latest(self, max_age_seconds: float = 3.0) -> Optional[CoordinateLeadSnapshot]:
+        with self.lock:
+            lead = self.lead
+        if lead is None:
+            return None
+        if max_age_seconds > 0 and time.monotonic() - lead.updated_at > max_age_seconds:
+            return None
+        return lead
+
+    def followers(self, max_age_seconds: float = 3.0) -> Tuple[CoordinateClientSnapshot, ...]:
+        now = time.monotonic()
+        with self.lock:
+            lead_pid = self.lead.pid if self.lead is not None else None
+            clients = tuple(self.clients.values())
+        recent = []
+        for snapshot in clients:
+            if lead_pid is not None and snapshot.pid == lead_pid:
+                continue
+            if max_age_seconds > 0 and now - snapshot.updated_at > max_age_seconds:
+                continue
+            if str(snapshot.role or "").strip().lower() == CoordinateFollowScript.ROLE_LEAD.lower():
+                continue
+            recent.append(snapshot)
+        return tuple(sorted(recent, key=lambda item: (item.name.lower(), item.pid)))
+
+
+_COORDINATE_FOLLOW_REGISTRY = CoordinateFollowRegistry()
+
+
+class CoordinateFollowScript(ClientScriptBase):
+    script_id = "coordinate_follow"
+    script_label = "Coordinate Follow"
+    ROLE_FOLLOWER = "Follower"
+    ROLE_LEAD = "Lead"
+    DEFAULT_DISTANCE_THRESHOLD = 1.0
+    DEFAULT_FORMATION_RADIUS = 0.0
+
+    def __init__(self, client, config: Dict[str, object], host):
+        super().__init__(client, config, host)
+        self.enabled = False
+        self.last_position_poll_at = 0.0
+        self.last_follow_at = 0.0
+        self.last_combat_at = 0.0
+        self.move_count = 0
+        self.last_lead_name = ""
+        self.last_lead_position: Optional[Tuple[float, float, float]] = None
+        self.last_target_position: Optional[Tuple[float, float, float]] = None
+        self.last_move_error_key = ""
+        self.formation_retry = 0
+        self.walk_bypass_active = False
+
+    def on_start(self):
+        super().on_start()
+        self.enabled = True
+        self.last_position_poll_at = 0.0
+        self.last_follow_at = 0.0
+        self.last_combat_at = 0.0
+        self.move_count = 0
+        self.last_lead_name = ""
+        self.last_lead_position = None
+        self.last_target_position = None
+        self.last_move_error_key = ""
+        self.formation_retry = 0
+        self.walk_bypass_active = False
+        if self._bypass_no_walk():
+            self._set_walk_bypass_enabled(True)
+        if self._is_lead():
+            self.set_status("Publishing lead position")
+        else:
+            self.set_status("Timer mode waiting for lead")
+
+    def on_stop(self):
+        if self.walk_bypass_active:
+            self._set_walk_bypass_enabled(False)
+        _COORDINATE_FOLLOW_REGISTRY.clear(self.client.pid)
+        self.enabled = False
+        super().on_stop()
+
+    def needs_chat_feed(self) -> bool:
+        return not self._is_lead()
+
+    def chat_event_types(self) -> Tuple[str, ...]:
+        return ("attack", "damage")
+
+    def on_chat_event(self, event: ChatLineEvent):
+        if not self.should_process(event.sequence) or not self.enabled:
+            return
+        self._observe_combat_event(event)
+
+    def on_tick(self):
+        if not self.enabled:
+            return
+        if self._is_lead():
+            self._publish_lead_position()
+            return
+        self._tick_timer_follow()
+
+    def _publish_lead_position(self):
+        now = time.monotonic()
+        if now - self.last_position_poll_at < self._position_poll_interval():
+            return
+        self.last_position_poll_at = now
+        position = self._read_own_position()
+        if position is None:
+            self.set_status("Lead position unavailable")
+            return
+
+        snapshot = _COORDINATE_FOLLOW_REGISTRY.publish(
+            self.client.pid,
+            self.host.client.character_name or self.client.character_name or self.host.client.display_name,
+            position,
+        )
+        self.last_lead_name = snapshot.name
+        self.last_lead_position = (snapshot.x, snapshot.y, snapshot.z)
+        self.set_status("Lead active")
+
+    def _tick_timer_follow(self):
+        now = time.monotonic()
+        interval = self._follow_interval_seconds()
+        if now - self.last_follow_at < interval:
+            return
+        self.last_follow_at = now
+
+        if self._in_combat(now):
+            self.set_status("Paused in combat")
+            return
+
+        lead = _COORDINATE_FOLLOW_REGISTRY.latest(self._lead_stale_seconds())
+        if lead is None:
+            self.set_status("Waiting for lead position")
+            return
+        if int(lead.pid) == int(self.client.pid):
+            self.set_status("This client is the lead")
+            return
+
+        own_position = self._read_own_position()
+        if own_position is not None:
+            self._publish_own_position(own_position)
+
+        target_position = self._target_position_for_lead(lead)
+        if own_position is not None and self._distance(own_position, target_position) <= self._distance_threshold():
+            self.last_lead_name = lead.name
+            self.last_lead_position = (lead.x, lead.y, lead.z)
+            self.last_target_position = target_position
+            self.set_status(f"Near lead {lead.name or lead.pid}")
+            return
+
+        self._move_to_lead(lead, target_position, reason="interval")
+
+    def _move_to_lead(self, lead: CoordinateLeadSnapshot, target_position: Tuple[float, float, float], reason: str) -> bool:
+        try:
+            result = self.host.move_to_location(*target_position, bypass_no_walk=self._bypass_no_walk())
+        except Exception as exc:
+            error_key = f"exc:{type(exc).__name__}:{exc}"
+            self._report_move_error(error_key, f"move failed: {exc}")
+            self.set_status("Move failed")
+            return False
+
+        self.last_lead_name = lead.name
+        self.last_lead_position = (lead.x, lead.y, lead.z)
+        self.last_target_position = target_position
+        success = bool(result.get("success"))
+        if success:
+            self.move_count += 1
+            self.last_move_error_key = ""
+            self.formation_retry = 0
+            self.set_status(f"Moved near {lead.name or lead.pid} ({reason})")
+            if bool(self.config.get("echo_console", False)):
+                self.host.send_console(f"HGCC coordinate follow -> {lead.name or lead.pid}")
+            self.host.notify_state_changed()
+            return True
+
+        if self._is_nonfatal_move_rejection(result):
+            self.last_move_error_key = ""
+            if self._formation_radius() > 0:
+                self.formation_retry += 1
+            self.set_status(f"Move skipped near {lead.name or lead.pid}")
+            return False
+
+        error_key = f"move:{result.get('rc')}:{result.get('err')}"
+        self._report_move_error(
+            error_key,
+            f"move failed rc={result.get('rc')} err={result.get('err')}",
+        )
+        self.set_status("Move failed")
+        return False
+
+    def _report_move_error(self, key: str, text: str):
+        if key == self.last_move_error_key:
+            return
+        self.last_move_error_key = key
+        self.host.emit(
+            "error",
+            f"{self.host.client.display_name}: {self.script_label} {text}",
+            script_id=self.script_id,
+        )
+
+    def _is_nonfatal_move_rejection(self, result: dict) -> bool:
+        try:
+            rc = int(result.get("rc", 0) or 0)
+            err = int(result.get("err", 0) or 0)
+        except (TypeError, ValueError):
+            return False
+        return rc == 0 and err == 31
+
+    def _set_walk_bypass_enabled(self, enabled: bool):
+        try:
+            result = self.host.set_walk_bypass(enabled)
+        except Exception as exc:
+            error_key = f"walk-bypass:{enabled}:exc:{type(exc).__name__}:{exc}"
+            self._report_move_error(error_key, f"walk bypass {'enable' if enabled else 'disable'} failed: {exc}")
+            if enabled:
+                self.walk_bypass_active = False
+            return False
+
+        success = bool(result.get("success"))
+        active = bool(result.get("enabled"))
+        if success:
+            self.walk_bypass_active = active
+            return True
+
+        error_key = f"walk-bypass:{enabled}:{result.get('err')}"
+        self._report_move_error(
+            error_key,
+            f"walk bypass {'enable' if enabled else 'disable'} failed err={result.get('err')}",
+        )
+        if enabled:
+            self.walk_bypass_active = False
+        return False
+
+    def _read_own_position(self) -> Optional[Tuple[float, float, float]]:
+        try:
+            query = self.host.query_state()
+        except Exception as exc:
+            error_key = f"query:{type(exc).__name__}:{exc}"
+            self._report_move_error(error_key, f"position query failed: {exc}")
+            return None
+
+        if not query.get("position_valid"):
+            return None
+        position = query.get("position")
+        if position is None:
+            position = (
+                query.get("position_x", 0.0),
+                query.get("position_y", 0.0),
+                query.get("position_z", 0.0),
+            )
+        return (float(position[0]), float(position[1]), float(position[2]))
+
+    def _publish_own_position(self, position: Tuple[float, float, float]):
+        _COORDINATE_FOLLOW_REGISTRY.publish_client(
+            self.client.pid,
+            self.host.client.character_name or self.client.character_name or self.host.client.display_name,
+            self.ROLE_LEAD if self._is_lead() else self.ROLE_FOLLOWER,
+            position,
+        )
+
+    def _target_position_for_lead(self, lead: CoordinateLeadSnapshot) -> Tuple[float, float, float]:
+        radius = self._formation_radius()
+        if radius <= 0:
+            return (lead.x, lead.y, lead.z)
+        slot_index, slot_count = self._formation_slot()
+        angle = (math.tau * (slot_index % slot_count) / slot_count) + (self.formation_retry * math.pi / 4.0)
+        return (
+            lead.x + math.cos(angle) * radius,
+            lead.y + math.sin(angle) * radius,
+            lead.z,
+        )
+
+    def _formation_slot(self) -> Tuple[int, int]:
+        followers = list(_COORDINATE_FOLLOW_REGISTRY.followers(self._lead_stale_seconds()))
+        self_pid = int(self.client.pid)
+        if all(snapshot.pid != self_pid for snapshot in followers):
+            followers.append(CoordinateClientSnapshot(
+                pid=self_pid,
+                name=self.host.client.character_name or self.client.character_name or self.host.client.display_name,
+                role=self.ROLE_FOLLOWER,
+                x=0.0,
+                y=0.0,
+                z=0.0,
+                updated_at=time.monotonic(),
+            ))
+            followers.sort(key=lambda item: (item.name.lower(), item.pid))
+        slot_count = max(len(followers), 1)
+        for index, snapshot in enumerate(followers):
+            if snapshot.pid == self_pid:
+                return index, slot_count
+        return 0, slot_count
+
+    def _observe_combat_event(self, event: ChatLineEvent):
+        if event.attack is not None or event.damage is not None:
+            self.last_combat_at = time.monotonic()
+
+    def _in_combat(self, now: Optional[float] = None) -> bool:
+        now = time.monotonic() if now is None else float(now)
+        return now - self.last_combat_at < self._combat_grace_seconds()
+
+    def _is_lead(self) -> bool:
+        return str(self.config.get("role", self.ROLE_FOLLOWER) or "").strip().lower() == self.ROLE_LEAD.lower()
+
+    def _follow_interval_seconds(self) -> float:
+        return max(float(self.config.get("follow_interval_seconds", 0.5)), 0.1)
+
+    def _position_poll_interval(self) -> float:
+        return max(float(self.config.get("position_poll_interval", 0.25)), 0.05)
+
+    def _distance_threshold(self) -> float:
+        return max(float(self.config.get("distance_threshold", self.DEFAULT_DISTANCE_THRESHOLD)), 0.0)
+
+    def _formation_radius(self) -> float:
+        return max(float(self.config.get("formation_radius", self.DEFAULT_FORMATION_RADIUS)), 0.0)
+
+    def _bypass_no_walk(self) -> bool:
+        return bool(self.config.get("bypass_no_walk", True))
+
+    def _combat_grace_seconds(self) -> float:
+        return max(float(self.config.get("combat_grace_seconds", 6.0)), 0.0)
+
+    def _lead_stale_seconds(self) -> float:
+        return max(float(self.config.get("lead_stale_seconds", 3.0)), 0.25)
+
+    def _distance(self, left: Tuple[float, float, float], right: Tuple[float, float, float]) -> float:
+        dx = float(left[0]) - float(right[0])
+        dy = float(left[1]) - float(right[1])
+        dz = float(left[2]) - float(right[2])
+        return (dx * dx + dy * dy + dz * dz) ** 0.5
+
+    def _format_position(self, position: Optional[Tuple[float, float, float]]) -> str:
+        if position is None:
+            return "<unknown>"
+        return f"{position[0]:.1f}, {position[1]:.1f}, {position[2]:.1f}"
+
+    def get_state_details(self) -> dict:
+        details = super().get_state_details()
+        details.update({
+            "role": self.ROLE_LEAD if self._is_lead() else self.ROLE_FOLLOWER,
+            "mode": "Timer",
+            "move_count": self.move_count,
+            "last_lead_name": self.last_lead_name,
+            "last_lead_position": self._format_position(self.last_lead_position),
+            "last_target_position": self._format_position(self.last_target_position),
+            "formation_radius": self._formation_radius(),
+            "bypass_no_walk": self._bypass_no_walk(),
+            "walk_bypass_active": self.walk_bypass_active,
+            "in_combat": self._in_combat(),
+        })
+        return details
 
 
 class AlwaysOnScript(AutoFollowScript):
@@ -6256,7 +6684,7 @@ class AlwaysOnScript(AutoFollowScript):
 
         line = str(text or "")
         self._handle_auto_wallet_line(line)
-        if not self._disabled("disable_follow"):
+        if not self._disabled("disable_follow") and not _COORDINATE_FOLLOW_REGISTRY.is_lead(self.client.pid):
             self._handle_follow_line(line)
 
     def _handle_auto_wallet_line(self, line: str):
@@ -6327,7 +6755,7 @@ class AlwaysOnScript(AutoFollowScript):
             "spellbook_fill_count": self.spellbook_fill_count,
             "fog_off_count": self.fog_off_count,
             "last_wallet_action": self.last_wallet_action,
-            "disable_follow": self._disabled("disable_follow"),
+            "disable_assist": self._disabled("disable_follow"),
             "disable_wallet": self._disabled("disable_wallet"),
             "disable_spellbook_fill": self._disabled("disable_spellbook_fill"),
             "disable_fog_off": self._disabled("disable_fog_off"),
@@ -7747,6 +8175,12 @@ class ClientScriptHost:
             raise RuntimeError("chat is locked out because the client is at the password prompt")
         return runtime.send_chat(self.client, text, mode)
 
+    def move_to_location(self, x: float, y: float, z: float, bypass_no_walk: bool = False):
+        return runtime.move_to_location(self.client, x, y, z, bypass_no_walk=bypass_no_walk)
+
+    def set_walk_bypass(self, enabled: bool):
+        return runtime.set_walk_bypass(self.client, enabled)
+
     def show_overlay_text(
         self,
         text: str,
@@ -8199,20 +8633,103 @@ class ScriptManager:
         )
         self.registry[auto_attack.script_id] = auto_attack
 
+        coordinate_follow = ScriptDefinition(
+            script_id="coordinate_follow",
+            name="Coordinate Follow",
+            description="Move followers to the current lead position on a timer.",
+            fields=[
+                ScriptField(
+                    "role",
+                    "Role",
+                    "choice",
+                    CoordinateFollowScript.ROLE_FOLLOWER,
+                    choices=[CoordinateFollowScript.ROLE_FOLLOWER, CoordinateFollowScript.ROLE_LEAD],
+                    width=10,
+                ),
+                ScriptField(
+                    "follow_interval_seconds",
+                    "Interval",
+                    "float",
+                    0.5,
+                    minimum=0.1,
+                    maximum=5.0,
+                    step=0.1,
+                    width=6,
+                    help_text="How often each follower re-sends a move command while out of combat. Lower values feel stickier but send more commands.",
+                ),
+                ScriptField(
+                    "distance_threshold",
+                    "Distance",
+                    "float",
+                    CoordinateFollowScript.DEFAULT_DISTANCE_THRESHOLD,
+                    minimum=0.0,
+                    maximum=20.0,
+                    step=0.1,
+                    width=6,
+                    help_text="How close the follower must be to its assigned destination before it stops issuing movement. Smaller values follow more tightly.",
+                ),
+                ScriptField(
+                    "formation_radius",
+                    "Radius",
+                    "float",
+                    CoordinateFollowScript.DEFAULT_FORMATION_RADIUS,
+                    minimum=0.0,
+                    maximum=20.0,
+                    step=0.1,
+                    width=6,
+                    help_text="How far from the lead's exact XYZ the follower aims. 0 stacks directly on the lead; larger values form a small ring around them.",
+                ),
+                ScriptField("bypass_no_walk", "Bypass No-Walk", "bool", True),
+                ScriptField(
+                    "combat_grace_seconds",
+                    "Combat Pause",
+                    "float",
+                    6.0,
+                    minimum=0.0,
+                    maximum=30.0,
+                    step=0.5,
+                    width=7,
+                    help_text="How many seconds after this follower appears in attack or damage log lines before timer movement resumes.",
+                ),
+                ScriptField("position_poll_interval", "Lead Poll", "float", 0.25, minimum=0.05, maximum=2.0, step=0.05, width=6),
+                ScriptField("lead_stale_seconds", "Stale", "float", 3.0, minimum=0.25, maximum=30.0, step=0.25, width=6),
+                ScriptField("poll_interval", "Poll", "float", 0.05, minimum=0.01, maximum=2.0, step=0.01, width=6),
+                ScriptField("max_lines", "Batch", "int", 120, minimum=1, maximum=500, step=1, width=5),
+                ScriptField("echo_console", "Echo", "bool", False),
+                ScriptField("include_backlog", "Backlog", "bool", False),
+            ],
+            factory=CoordinateFollowScript,
+            details=(
+                "Coordinate Follow uses direct XYZ movement. Start Lead makes the selected client the only position publisher; "
+                "Start Follower makes the selected client move toward that lead on the timer while out of combat.\n\n"
+                "The Lead checkbox beside Saved marks the selected character as the lead used by Start Saved, and only one "
+                "character can have that saved lead role at a time. Checking it also enables Coordinate Follow in Saved for that character.\n\n"
+                "Interval is how often followers re-issue movement. Distance is how close a follower can be to its assigned "
+                "destination before it stops sending moves. Radius offsets followers around the lead; 0, the default, aims "
+                "directly at the lead's exact coordinates, while larger values keep a close but less collision-prone ring.\n\n"
+                "Bypass No-Walk keeps Diamond's local gui_nowalk check bypassed while this script is running, so the client can "
+                "send a walk packet even when it thinks the exact coordinate is occupied. Combat Pause prevents timer movement "
+                "for that many seconds after the follower appears in attack or damage log lines.\n\n"
+                "Debug / Advanced: Lead Poll controls how often the lead publishes XYZ. Stale is how old a lead position may be "
+                "before followers ignore it. Poll, Batch, Backlog, and Echo are chat/debug plumbing and usually do not need changes."
+            ),
+        )
+        self.registry[coordinate_follow.script_id] = coordinate_follow
+
         always_on = ScriptDefinition(
             script_id="always_on",
             name="Basic Functions",
             description=(
-                "Bundle the usual background helpers: Auto Follow cues, Zerial wallet refresh, spellbook fill on rest, "
+                "Bundle the usual background helpers: Assist cues, Zerial wallet refresh, spellbook fill on rest, "
                 "and fog disable on area transitions."
             ),
             fields=[
-                ScriptField("cooldown_seconds", "Follow CD", "float", 1.0, minimum=0.1, maximum=30.0, step=0.1, width=6),
-                ScriptField("disable_follow", "Disable Follow", "bool", False),
+                ScriptField("cooldown_seconds", "Assist CD", "float", 1.0, minimum=0.1, maximum=30.0, step=0.1, width=6),
+                ScriptField("disable_follow", "Disable Assist", "bool", False),
                 ScriptField("disable_wallet", "Disable Wallet", "bool", False),
                 ScriptField("disable_spellbook_fill", "Disable SB Fill", "bool", False),
                 ScriptField("disable_fog_off", "Disable Fog Off", "bool", False),
-                ScriptField("follow_cues_dir", "Follow Cues", "text", "", width=36),
+                ScriptField("follow_cues_dir", "Assist Cues", "text", "", width=36),
                 ScriptField("poll_interval", "Poll", "float", 0.05, minimum=0.01, maximum=2.0, step=0.01, width=6),
                 ScriptField("max_lines", "Batch", "int", 200, minimum=1, maximum=500, step=1, width=5),
                 ScriptField("echo_console", "Echo", "bool", False),
@@ -8220,8 +8737,8 @@ class ScriptManager:
             ],
             factory=AlwaysOnScript,
             details=(
-                "Basic Functions is the background utility bundle for day-to-day play. It listens for follow cue phrases, "
-                "refreshes the Zerial wallet when you enter the workshop, fills the spellbook after resting, and disables "
+                "Basic Functions is the background utility bundle for day-to-day play. It listens for assist cue phrases, "
+                "assists the cue speaker's target, refreshes the Zerial wallet when you enter the workshop, fills the spellbook after resting, and disables "
                 "fog on area transitions, with each helper available as an individual toggle."
             ),
         )
