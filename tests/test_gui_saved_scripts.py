@@ -32,22 +32,39 @@ class FakeScriptManager:
             "auto_attack": SimpleNamespace(name="Auto Attack"),
             "always_on": SimpleNamespace(name="Basic Functions"),
             "ingame_timers": SimpleNamespace(name="Timers"),
+            "coordinate_follow": SimpleNamespace(name="Coordinate Follow"),
         }
         self.hosts = {}
         self.started = []
         self.stopped = []
         self.running = {}
+        self.running_details = {}
 
     def default_config(self, script_id):
+        if script_id == "coordinate_follow":
+            return {
+                "script_id": script_id,
+                "role": "Follower",
+                "distance_threshold": 1.0,
+                "formation_radius": 0.0,
+                "bypass_no_walk": True,
+            }
+        if script_id == "auto_attack":
+            return {"script_id": script_id, "cooldown_seconds": 3.0}
         return {"script_id": script_id}
 
     def get_state(self, client_pid, script_id):
         running = bool(self.running.get((client_pid, script_id)))
-        return {"running": running, "status": "Running" if running else "Stopped"}
+        return {
+            "running": running,
+            "status": "Running" if running else "Stopped",
+            "details": dict(self.running_details.get((client_pid, script_id), {})),
+        }
 
     def start_script(self, client, script_id, config):
         self.started.append((client.pid, script_id, dict(config)))
         self.running[(client.pid, script_id)] = True
+        self.running_details[(client.pid, script_id)] = {"role": dict(config).get("role")}
 
     def stop_script(self, client_pid, script_id):
         self.stopped.append((client_pid, script_id))
@@ -69,8 +86,11 @@ def make_bulk_app():
     app.clients_by_pid = {}
     app.clients = []
     app.last_background = None
+    app.script_toggles_in_progress = {}
+    app.events = []
     app.log_messages = []
     app.log = lambda message, level="info": app.log_messages.append((level, message))
+    app.enqueue_event = lambda event: app.events.append(event)
     app.persist_loaded_configs = lambda _pid: None
 
     def run_background(label, fn, refresh_after=False):
@@ -169,6 +189,145 @@ class GuiSavedScriptsTests(unittest.TestCase):
 
             self.assertGreaterEqual(app.get_script_config(202, "ingame_timers")["offset_y"], 88)
 
+    def test_coordinate_follow_lead_is_singleton_and_disables_basic_follow(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "character_defaults.user.json")
+            app = make_persistence_app(path)
+            app.clients_by_pid = {
+                101: SimpleNamespace(pid=101, character_name="Lead-One", display_name="Lead-One"),
+                202: SimpleNamespace(pid=202, character_name="Lead-Two", display_name="Lead-Two"),
+            }
+
+            first = app.script_manager.default_config("coordinate_follow")
+            first["role"] = "Lead"
+            second = app.script_manager.default_config("coordinate_follow")
+            second["role"] = "Lead"
+
+            app.set_script_config(101, "coordinate_follow", first)
+            app.set_script_config(202, "coordinate_follow", second)
+
+            self.assertEqual(app.get_script_config(101, "coordinate_follow")["role"], "Follower")
+            self.assertEqual(app.get_script_config(202, "coordinate_follow")["role"], "Lead")
+            self.assertTrue(app.get_script_config(202, "always_on")["disable_follow"])
+
+    def test_saved_coordinate_follow_lead_checkbox_state_is_singleton(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "character_defaults.user.json")
+            app = make_persistence_app(path)
+            app.clients_by_pid = {
+                101: SimpleNamespace(pid=101, character_name="Lead-One", display_name="Lead-One"),
+                202: SimpleNamespace(pid=202, character_name="Lead-Two", display_name="Lead-Two"),
+            }
+
+            app.set_coordinate_follow_saved_lead(101, True, enable_saved=True)
+            app.set_coordinate_follow_saved_lead(202, True, enable_saved=True)
+
+            self.assertEqual(app.get_script_config(101, "coordinate_follow")["role"], "Follower")
+            self.assertEqual(app.get_script_config(202, "coordinate_follow")["role"], "Lead")
+            self.assertTrue(app.get_script_autostart(101, "coordinate_follow"))
+            self.assertTrue(app.get_script_autostart(202, "coordinate_follow"))
+
+    def test_start_saved_coordinate_follow_demotes_extra_saved_leads(self):
+        app = make_bulk_app()
+        app.clients = [
+            SimpleNamespace(pid=1, injected=True, display_name="Alpha"),
+            SimpleNamespace(pid=2, injected=True, display_name="Beta"),
+        ]
+        app.clients_by_pid = {record.pid: record for record in app.clients}
+        for pid in (1, 2):
+            app.script_autostart[(pid, "always_on")] = False
+            app.script_autostart[(pid, "ingame_timers")] = False
+            app.script_autostart[(pid, "coordinate_follow")] = True
+            app.script_configs[(pid, "coordinate_follow")] = {"script_id": "coordinate_follow", "role": "Lead"}
+
+        app.start_saved_scripts_all_async()
+
+        self.assertEqual(
+            app.script_manager.started,
+            [
+                (
+                    1,
+                    "coordinate_follow",
+                    {
+                        "script_id": "coordinate_follow",
+                        "role": "Lead",
+                        "distance_threshold": 1.0,
+                        "formation_radius": 0.0,
+                        "bypass_no_walk": True,
+                    },
+                ),
+                (
+                    2,
+                    "coordinate_follow",
+                    {
+                        "script_id": "coordinate_follow",
+                        "role": "Follower",
+                        "distance_threshold": 1.0,
+                        "formation_radius": 0.0,
+                        "bypass_no_walk": True,
+                    },
+                ),
+            ],
+        )
+        self.assertEqual(app.get_script_config(1, "coordinate_follow")["role"], "Lead")
+        self.assertEqual(app.get_script_config(2, "coordinate_follow")["role"], "Follower")
+
+    def test_live_config_change_restarts_running_script(self):
+        app = make_bulk_app()
+        client = SimpleNamespace(pid=1, injected=True, display_name="Alpha", character_name="")
+        app.clients = [client]
+        app.clients_by_pid = {client.pid: client}
+        app.script_configs[(1, "auto_attack")] = {"script_id": "auto_attack", "cooldown_seconds": 3.0}
+        app.script_manager.running[(1, "auto_attack")] = True
+
+        changed = app.apply_script_config_change(
+            1,
+            "auto_attack",
+            {"script_id": "auto_attack", "cooldown_seconds": 1.5},
+        )
+
+        self.assertTrue(changed)
+        self.assertEqual(app.script_manager.stopped, [(1, "auto_attack")])
+        self.assertEqual(
+            app.script_manager.started,
+            [(1, "auto_attack", {"script_id": "auto_attack", "cooldown_seconds": 1.5})],
+        )
+        self.assertEqual(app.get_script_config(1, "auto_attack")["cooldown_seconds"], 1.5)
+
+    def test_live_coordinate_follow_change_preserves_runtime_role(self):
+        app = make_bulk_app()
+        client = SimpleNamespace(pid=1, injected=True, display_name="Alpha", character_name="")
+        app.clients = [client]
+        app.clients_by_pid = {client.pid: client}
+        app.script_configs[(1, "coordinate_follow")] = {
+            "script_id": "coordinate_follow",
+            "role": "Lead",
+            "distance_threshold": 1.0,
+            "formation_radius": 0.0,
+            "bypass_no_walk": True,
+        }
+        app.script_manager.running[(1, "coordinate_follow")] = True
+        app.script_manager.running_details[(1, "coordinate_follow")] = {"role": "Follower"}
+
+        changed = app.apply_script_config_change(
+            1,
+            "coordinate_follow",
+            {
+                "script_id": "coordinate_follow",
+                "role": "Lead",
+                "distance_threshold": 0.25,
+                "formation_radius": 0.0,
+                "bypass_no_walk": True,
+            },
+        )
+
+        self.assertTrue(changed)
+        self.assertEqual(app.get_script_config(1, "coordinate_follow")["role"], "Lead")
+        self.assertEqual(app.get_script_config(1, "coordinate_follow")["distance_threshold"], 0.25)
+        self.assertEqual(app.script_manager.stopped, [(1, "coordinate_follow")])
+        self.assertEqual(app.script_manager.started[-1][2]["role"], "Follower")
+        self.assertEqual(app.script_manager.started[-1][2]["distance_threshold"], 0.25)
+
     def test_saved_script_flags_round_trip_with_character_defaults(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             path = os.path.join(tmpdir, "character_defaults.user.json")
@@ -253,7 +412,7 @@ class GuiSavedScriptsTests(unittest.TestCase):
             [
                 (1, "always_on", {"script_id": "always_on"}),
                 (1, "ingame_timers", {"script_id": "ingame_timers"}),
-                (2, "auto_attack", {"script_id": "auto_attack"}),
+                (2, "auto_attack", {"script_id": "auto_attack", "cooldown_seconds": 3.0}),
                 (2, "always_on", {"script_id": "always_on"}),
                 (2, "ingame_timers", {"script_id": "ingame_timers"}),
             ],

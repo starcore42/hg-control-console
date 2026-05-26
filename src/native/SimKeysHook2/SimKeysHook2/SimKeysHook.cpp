@@ -28,11 +28,15 @@ constexpr UINT kOpTriggerPageSlot = 3008;
 constexpr UINT kOpOverlayText = 3009;
 constexpr UINT kOpOverlayClear = 3010;
 constexpr UINT kOpOverlayClearAll = 3011;
+constexpr UINT kOpMoveToLocation = 3012;
+constexpr UINT kOpSetWalkBypass = 3013;
 
 constexpr UINT kMsgTriggerVk = WM_APP + 0x491;
 constexpr UINT kMsgSendChat = WM_APP + 0x492;
 constexpr UINT kMsgRefreshIdentity = WM_APP + 0x493;
 constexpr UINT kMsgTriggerPageSlot = WM_APP + 0x494;
+constexpr UINT kMsgMoveToLocation = WM_APP + 0x495;
+constexpr UINT kMsgSetWalkBypass = WM_APP + 0x496;
 constexpr DWORD kPipeBufferSize = 65536;
 constexpr DWORD kDispatchTimeoutMs = 2000;
 constexpr DWORD kPipeStartupTimeoutMs = 2000;
@@ -58,6 +62,10 @@ constexpr UINT kExpectedAppObjectResolver = 0x00405160;
 constexpr UINT kExpectedCurrentPlayerResolver = 0x00407850;
 constexpr UINT kExpectedPlayerNameBuilder = 0x004CEF20;
 constexpr UINT kExpectedNwnStringDestroy = 0x005BA420;
+constexpr UINT kExpectedWalkToWaypoint = 0x00407D70;
+constexpr UINT kExpectedWalkNoWalkBlock = 0x0042A7AB;
+constexpr UINT kExpectedWalkNoWalkBypassTarget = 0x0042A7D2;
+constexpr uint32_t kCurrentPlayerPositionOffset = 0x2Cu;
 constexpr uint32_t kQuickbarPanelSlotsOffset = 0x68u;
 constexpr uint32_t kQuickbarCurrentPageOffset = 0x2BB8u;
 constexpr uint32_t kQuickbarPageStride = 0xE70u;
@@ -155,6 +163,10 @@ struct QueryResponse {
   uint32_t quickbar_item_mask_high;
   uint32_t quickbar_equipped_mask_low;
   uint32_t quickbar_equipped_mask_high;
+  int32_t position_valid;
+  float position_x;
+  float position_y;
+  float position_z;
   char character_name[kCharacterNameCapacity];
 };
 
@@ -171,6 +183,37 @@ struct ChatSendResponse {
   int32_t success;
   int32_t mode;
   int32_t rc;
+  int32_t last_error;
+};
+
+struct MoveToLocationRequest {
+  float x;
+  float y;
+  float z;
+  int32_t client_side;
+  uint32_t action_object_id;
+  int32_t bypass_no_walk;
+};
+
+constexpr DWORD kMoveToLocationRequestLegacySize =
+    static_cast<DWORD>(sizeof(float) * 3 + sizeof(int32_t) + sizeof(uint32_t));
+
+struct MoveToLocationResponse {
+  int32_t success;
+  int32_t rc;
+  int32_t last_error;
+  float x;
+  float y;
+  float z;
+};
+
+struct WalkBypassRequest {
+  int32_t enabled;
+};
+
+struct WalkBypassResponse {
+  int32_t success;
+  int32_t enabled;
   int32_t last_error;
 };
 
@@ -215,6 +258,31 @@ struct PendingChatDispatch {
   volatile LONG result;
   volatile LONG last_error;
   char text[kPendingChatCapacity];
+};
+
+struct PendingMoveDispatch {
+  HANDLE event;
+  volatile LONG busy;
+  volatile LONG sequence_seed;
+  volatile LONG request_id;
+  volatile LONG result;
+  volatile LONG last_error;
+  volatile LONG client_side;
+  volatile LONG bypass_no_walk;
+  uint32_t action_object_id;
+  float x;
+  float y;
+  float z;
+};
+
+struct PendingWalkBypassDispatch {
+  HANDLE event;
+  volatile LONG busy;
+  volatile LONG sequence_seed;
+  volatile LONG request_id;
+  volatile LONG enabled;
+  volatile LONG result;
+  volatile LONG last_error;
 };
 
 struct ChatLineEntry {
@@ -288,6 +356,8 @@ struct SimKeysState {
   PendingDispatch pending;
   PendingChatDispatch pending_chat;
   PendingIdentityDispatch pending_identity;
+  PendingMoveDispatch pending_move;
+  PendingWalkBypassDispatch pending_walk_bypass;
   HANDLE log_file;
   char module_path[MAX_PATH];
   char log_path[MAX_PATH];
@@ -325,6 +395,7 @@ struct SimKeysState {
   volatile LONG player_object;
   volatile LONG identity_refresh_count;
   volatile LONG identity_error;
+  volatile LONG walk_no_walk_bypass_enabled;
   volatile LONG last_vk;
   volatile LONG last_result;
   volatile LONG last_error;
@@ -346,6 +417,8 @@ size_t g_chat_log_stolen = 0;
 BYTE g_wgl_swap_original[8] = {};
 void* g_wgl_swap_gateway = nullptr;
 size_t g_wgl_swap_stolen = 0;
+BYTE g_walk_no_walk_original[5] = {};
+bool g_walk_no_walk_bypass_installed = false;
 
 typedef BOOL (WINAPI* WglSwapLayerBuffersFn)(HDC hdc, UINT planes);
 typedef void (APIENTRY* GlDisableFn)(UINT cap);
@@ -386,6 +459,7 @@ BOOL DiscoverQuickbarPanelByScan(const char* reason);
 BOOL InstallChatWindowLogHook();
 BOOL InstallOverlayHook();
 BOOL RefreshCharacterIdentity(DWORD* out_error);
+BOOL SetWalkNoWalkBypassEnabledOnWindowThread(BOOL enabled);
 void UpdateQuickbarItemMasksOnWindowThread();
 
 uintptr_t GetProcessImageBase() {
@@ -441,6 +515,45 @@ uint32_t ReadAppInnerPointer() {
 uint32_t ReadCurrentPlayerObjectId() {
   const uint32_t app_inner = ReadAppInnerPointer();
   return app_inner != 0 ? SafeReadPointer32(static_cast<uintptr_t>(app_inner) + 0x20u) : 0;
+}
+
+bool IsPlausibleCoordinate(float value) {
+  return value == value && value > -1000000.0f && value < 1000000.0f;
+}
+
+bool IsPlausiblePosition(float x, float y, float z) {
+  return IsPlausibleCoordinate(x) && IsPlausibleCoordinate(y) && IsPlausibleCoordinate(z);
+}
+
+BOOL TryReadCurrentPlayerPosition(float* out_x, float* out_y, float* out_z) {
+  if (out_x == nullptr || out_y == nullptr || out_z == nullptr) {
+    SetLastError(ERROR_INVALID_PARAMETER);
+    return FALSE;
+  }
+
+  const uint32_t player_object = static_cast<uint32_t>(InterlockedCompareExchange(&g_state.player_object, 0, 0));
+  if (player_object == 0) {
+    SetLastError(ERROR_NOT_FOUND);
+    return FALSE;
+  }
+
+  float x = 0.0f;
+  float y = 0.0f;
+  float z = 0.0f;
+  const uintptr_t position_base = static_cast<uintptr_t>(player_object) + kCurrentPlayerPositionOffset;
+  if (!SafeReadValue(position_base + 0u, &x) ||
+      !SafeReadValue(position_base + 4u, &y) ||
+      !SafeReadValue(position_base + 8u, &z) ||
+      !IsPlausiblePosition(x, y, z)) {
+    SetLastError(ERROR_INVALID_DATA);
+    return FALSE;
+  }
+
+  *out_x = x;
+  *out_y = y;
+  *out_z = z;
+  SetLastError(ERROR_SUCCESS);
+  return TRUE;
 }
 
 bool IsValidObjectId(uint32_t object_id) {
@@ -2224,6 +2337,7 @@ void BuildSnapshotText(const char* reason, char* out, size_t capacity) {
   const uint32_t runtime_current_player_resolver = RebaseAddress(kExpectedCurrentPlayerResolver);
   const uint32_t runtime_player_name_builder = RebaseAddress(kExpectedPlayerNameBuilder);
   const uint32_t runtime_nwn_string_destroy = RebaseAddress(kExpectedNwnStringDestroy);
+  const uint32_t runtime_walk_to_waypoint = RebaseAddress(kExpectedWalkToWaypoint);
   char character_name[kCharacterNameCapacity] = {};
   CopyStoredCharacterName(character_name, ARRAYSIZE(character_name));
   const LONG quickbar_slot_type = InterlockedCompareExchange(&g_state.quickbar_slot_type, 0, 0);
@@ -2251,6 +2365,10 @@ void BuildSnapshotText(const char* reason, char* out, size_t capacity) {
   }
 
   const HWND foreground = GetForegroundWindow();
+  float position_x = 0.0f;
+  float position_y = 0.0f;
+  float position_z = 0.0f;
+  const BOOL position_valid = TryReadCurrentPlayerPosition(&position_x, &position_y, &position_z);
 
   const uint32_t app_holder = ReadAppHolderPointer();
   const uint32_t app_object = ReadAppObjectPointer();
@@ -2351,6 +2469,14 @@ void BuildSnapshotText(const char* reason, char* out, size_t capacity) {
       runtime_current_player_resolver,
       runtime_player_name_builder,
       runtime_nwn_string_destroy);
+  AppendFormat(out, capacity, &offset, "movement: walkToWaypoint=0x%08X pendingBusy=%ld noWalkBypass=%ld positionValid=%d position=(%.3f, %.3f, %.3f)\r\n",
+      runtime_walk_to_waypoint,
+      InterlockedCompareExchange(&g_state.pending_move.busy, 0, 0),
+      InterlockedCompareExchange(&g_state.walk_no_walk_bypass_enabled, 0, 0),
+      position_valid ? 1 : 0,
+      static_cast<double>(position_x),
+      static_cast<double>(position_y),
+      static_cast<double>(position_z));
   AppendFormat(out, capacity, &offset, "identity: player=0x%08X name=%s refreshes=%ld err=%ld\r\n",
       static_cast<uint32_t>(InterlockedCompareExchange(&g_state.player_object, 0, 0)),
       character_name[0] != '\0' ? character_name : "<unknown>",
@@ -2419,6 +2545,123 @@ LONG CallChatSendDirect(const char* text, int mode) {
   message.length = static_cast<int32_t>(strnlen(text, kPendingChatCapacity));
   fn(&message, mode);
   return 1;
+}
+
+BOOL InstallWalkNoWalkBypassPatch(BYTE* original, SIZE_T original_size) {
+  if (original == nullptr || original_size < 5) {
+    SetLastError(ERROR_INVALID_PARAMETER);
+    return FALSE;
+  }
+
+  BYTE* source = reinterpret_cast<BYTE*>(RebaseAddress(kExpectedWalkNoWalkBlock));
+  BYTE* target = reinterpret_cast<BYTE*>(RebaseAddress(kExpectedWalkNoWalkBypassTarget));
+  const BYTE expected[] = {0x6A, 0x00, 0x83, 0xEC, 0x10};
+
+  __try {
+    memcpy(original, source, sizeof(expected));
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    SetLastError(static_cast<DWORD>(GetExceptionCode()));
+    return FALSE;
+  }
+
+  if (memcmp(original, expected, sizeof(expected)) != 0) {
+    SetLastError(ERROR_INVALID_DATA);
+    return FALSE;
+  }
+
+  BYTE patch[5] = {};
+  patch[0] = 0xE9;
+  const intptr_t rel = reinterpret_cast<intptr_t>(target) - reinterpret_cast<intptr_t>(source + sizeof(patch));
+  *reinterpret_cast<int32_t*>(patch + 1) = static_cast<int32_t>(rel);
+  WriteExecutableMemory(source, patch, sizeof(patch));
+  SetLastError(ERROR_SUCCESS);
+  return TRUE;
+}
+
+void RestoreWalkNoWalkBypassPatch(const BYTE* original, SIZE_T original_size) {
+  if (original == nullptr || original_size < 5) {
+    return;
+  }
+  BYTE* source = reinterpret_cast<BYTE*>(RebaseAddress(kExpectedWalkNoWalkBlock));
+  WriteExecutableMemory(source, original, 5);
+}
+
+BOOL SetWalkNoWalkBypassEnabledOnWindowThread(BOOL enabled) {
+  if (enabled) {
+    if (g_walk_no_walk_bypass_installed) {
+      InterlockedExchange(&g_state.walk_no_walk_bypass_enabled, 1);
+      SetLastError(ERROR_SUCCESS);
+      return TRUE;
+    }
+
+    if (!InstallWalkNoWalkBypassPatch(g_walk_no_walk_original, sizeof(g_walk_no_walk_original))) {
+      return FALSE;
+    }
+
+    g_walk_no_walk_bypass_installed = true;
+    InterlockedExchange(&g_state.walk_no_walk_bypass_enabled, 1);
+    SetLastError(ERROR_SUCCESS);
+    LogMessage(kLogInfo, "walk no-walk bypass enabled");
+    return TRUE;
+  }
+
+  if (g_walk_no_walk_bypass_installed) {
+    RestoreWalkNoWalkBypassPatch(g_walk_no_walk_original, sizeof(g_walk_no_walk_original));
+    ZeroMemory(g_walk_no_walk_original, sizeof(g_walk_no_walk_original));
+    g_walk_no_walk_bypass_installed = false;
+    LogMessage(kLogInfo, "walk no-walk bypass disabled");
+  }
+
+  InterlockedExchange(&g_state.walk_no_walk_bypass_enabled, 0);
+  SetLastError(ERROR_SUCCESS);
+  return TRUE;
+}
+
+LONG CallMoveToLocationDirect(float x, float y, float z, int client_side, uint32_t action_object_id, int bypass_no_walk) {
+  if (!IsPlausiblePosition(x, y, z)) {
+    SetLastError(ERROR_INVALID_PARAMETER);
+    return 0;
+  }
+
+  typedef int (__thiscall* WalkToWaypointFn)(
+      void* app_object,
+      float x,
+      float y,
+      float z,
+      int client_side,
+      uint32_t action_object_id);
+
+  const uint32_t app_object = ReadAppObjectPointer();
+  if (app_object == 0) {
+    SetLastError(ERROR_NOT_FOUND);
+    return 0;
+  }
+
+  const WalkToWaypointFn fn = reinterpret_cast<WalkToWaypointFn>(RebaseAddress(kExpectedWalkToWaypoint));
+  const uint32_t resolved_action_object_id = action_object_id != 0 ? action_object_id : kInvalidObjectId;
+  BYTE no_walk_original[5] = {};
+  const bool bypass_already_installed = g_walk_no_walk_bypass_installed;
+  const BOOL bypass_installed = (bypass_no_walk && !bypass_already_installed)
+      ? InstallWalkNoWalkBypassPatch(no_walk_original, sizeof(no_walk_original))
+      : FALSE;
+  if (bypass_no_walk && !bypass_already_installed && !bypass_installed) {
+    return 0;
+  }
+
+  SetLastError(ERROR_SUCCESS);
+  const LONG rc = static_cast<LONG>(fn(
+      reinterpret_cast<void*>(app_object),
+      x,
+      y,
+      z,
+      client_side ? 1 : 0,
+      resolved_action_object_id));
+  const DWORD call_error = GetLastError();
+  if (bypass_installed) {
+    RestoreWalkNoWalkBypassPatch(no_walk_original, sizeof(no_walk_original));
+  }
+  SetLastError(call_error);
+  return rc;
 }
 
 BOOL ResolveCurrentCharacterIdentityOnWindowThread(DWORD* out_error) {
@@ -2821,6 +3064,93 @@ LRESULT CALLBACK SimKeysWndProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM l
     InterlockedExchange(&g_state.last_chat_result, rc);
     InterlockedExchange(&g_state.last_chat_error, static_cast<LONG>(last_error));
     SetEvent(g_state.pending_chat.event);
+    return 0;
+  }
+
+  if (message == kMsgMoveToLocation) {
+    const LONG request_id = static_cast<LONG>(lparam);
+    if (request_id != InterlockedCompareExchange(&g_state.pending_move.request_id, 0, 0)) {
+      return 0;
+    }
+
+    const float x = g_state.pending_move.x;
+    const float y = g_state.pending_move.y;
+    const float z = g_state.pending_move.z;
+    const LONG client_side = InterlockedCompareExchange(&g_state.pending_move.client_side, 0, 0);
+    const LONG bypass_no_walk = InterlockedCompareExchange(&g_state.pending_move.bypass_no_walk, 0, 0);
+    const uint32_t action_object_id = g_state.pending_move.action_object_id;
+    DWORD last_error = ERROR_SUCCESS;
+    LONG rc = 0;
+
+    __try {
+      rc = CallMoveToLocationDirect(x, y, z, static_cast<int>(client_side), action_object_id, static_cast<int>(bypass_no_walk));
+      if (rc == 0) {
+        last_error = GetLastError();
+        if (last_error == ERROR_SUCCESS) {
+          last_error = ERROR_GEN_FAILURE;
+        }
+      }
+      LogMessage(
+          last_error == ERROR_SUCCESS ? kLogInfo : kLogError,
+          "move-to-location dispatched x=%.3f y=%.3f z=%.3f clientSide=%ld bypassNoWalk=%ld actionObject=0x%08X rc=%ld err=%lu",
+          static_cast<double>(x),
+          static_cast<double>(y),
+          static_cast<double>(z),
+          client_side,
+          bypass_no_walk,
+          action_object_id,
+          rc,
+          static_cast<unsigned long>(last_error));
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+      last_error = static_cast<DWORD>(GetExceptionCode());
+      rc = 0;
+      LogMessage(
+          kLogError,
+          "move-to-location raised exception x=%.3f y=%.3f z=%.3f code=0x%08lX",
+          static_cast<double>(x),
+          static_cast<double>(y),
+          static_cast<double>(z),
+          static_cast<unsigned long>(last_error));
+    }
+
+    InterlockedExchange(&g_state.pending_move.result, rc);
+    InterlockedExchange(&g_state.pending_move.last_error, static_cast<LONG>(last_error));
+    UpdateLastOperation(0, rc, last_error);
+    SetEvent(g_state.pending_move.event);
+    return 0;
+  }
+
+  if (message == kMsgSetWalkBypass) {
+    const LONG request_id = static_cast<LONG>(lparam);
+    if (request_id != InterlockedCompareExchange(&g_state.pending_walk_bypass.request_id, 0, 0)) {
+      return 0;
+    }
+
+    const LONG enabled = InterlockedCompareExchange(&g_state.pending_walk_bypass.enabled, 0, 0);
+    DWORD last_error = ERROR_SUCCESS;
+    LONG rc = 0;
+
+    __try {
+      rc = SetWalkNoWalkBypassEnabledOnWindowThread(enabled ? TRUE : FALSE) ? 1 : 0;
+      if (rc == 0) {
+        last_error = GetLastError();
+        if (last_error == ERROR_SUCCESS) {
+          last_error = ERROR_GEN_FAILURE;
+        }
+      }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+      last_error = static_cast<DWORD>(GetExceptionCode());
+      rc = 0;
+      LogMessage(
+          kLogError,
+          "set walk no-walk bypass raised exception enabled=%ld code=0x%08lX",
+          enabled,
+          static_cast<unsigned long>(last_error));
+    }
+
+    InterlockedExchange(&g_state.pending_walk_bypass.result, rc);
+    InterlockedExchange(&g_state.pending_walk_bypass.last_error, static_cast<LONG>(last_error));
+    SetEvent(g_state.pending_walk_bypass.event);
     return 0;
   }
 
@@ -3255,6 +3585,175 @@ BOOL TriggerChatMessage(const char* text, int mode, LONG* out_rc, DWORD* out_err
   return last_error == ERROR_SUCCESS;
 }
 
+BOOL TriggerMoveToLocation(
+    float x,
+    float y,
+    float z,
+    int client_side,
+    uint32_t action_object_id,
+    int bypass_no_walk,
+    LONG* out_rc,
+    DWORD* out_error) {
+  if (!IsPlausiblePosition(x, y, z)) {
+    if (out_rc != nullptr) {
+      *out_rc = 0;
+    }
+    if (out_error != nullptr) {
+      *out_error = ERROR_INVALID_PARAMETER;
+    }
+    UpdateLastOperation(0, 0, ERROR_INVALID_PARAMETER);
+    return FALSE;
+  }
+
+  if (!EnsureHookInstalled()) {
+    const DWORD gle = GetLastError();
+    if (out_rc != nullptr) {
+      *out_rc = 0;
+    }
+    if (out_error != nullptr) {
+      *out_error = gle;
+    }
+    return FALSE;
+  }
+
+  if (InterlockedCompareExchange(&g_state.pending_move.busy, 1, 0) != 0) {
+    if (out_rc != nullptr) {
+      *out_rc = 0;
+    }
+    if (out_error != nullptr) {
+      *out_error = ERROR_BUSY;
+    }
+    UpdateLastOperation(0, 0, ERROR_BUSY);
+    LogMessage(kLogError, "move-to-location rejected because a previous movement dispatch is still in flight");
+    return FALSE;
+  }
+
+  const LONG request_id = InterlockedIncrement(&g_state.pending_move.sequence_seed);
+  g_state.pending_move.x = x;
+  g_state.pending_move.y = y;
+  g_state.pending_move.z = z;
+  g_state.pending_move.action_object_id = action_object_id != 0 ? action_object_id : kInvalidObjectId;
+  InterlockedExchange(&g_state.pending_move.request_id, request_id);
+  InterlockedExchange(&g_state.pending_move.client_side, client_side ? 1 : 0);
+  InterlockedExchange(&g_state.pending_move.bypass_no_walk, bypass_no_walk ? 1 : 0);
+  InterlockedExchange(&g_state.pending_move.result, 0);
+  InterlockedExchange(&g_state.pending_move.last_error, ERROR_IO_PENDING);
+  ResetEvent(g_state.pending_move.event);
+  LogMessage(
+      kLogDebug,
+      "queueing move-to-location request x=%.3f y=%.3f z=%.3f clientSide=%d bypassNoWalk=%d actionObject=0x%08X",
+      static_cast<double>(x),
+      static_cast<double>(y),
+      static_cast<double>(z),
+      client_side ? 1 : 0,
+      bypass_no_walk ? 1 : 0,
+      g_state.pending_move.action_object_id);
+
+  if (!PostMessageA(g_state.hwnd, kMsgMoveToLocation, 0, static_cast<LPARAM>(request_id))) {
+    const DWORD gle = GetLastError();
+    InterlockedExchange(&g_state.pending_move.busy, 0);
+    if (out_rc != nullptr) {
+      *out_rc = 0;
+    }
+    if (out_error != nullptr) {
+      *out_error = gle;
+    }
+    UpdateLastOperation(0, 0, gle);
+    LogMessage(kLogError, "PostMessageA(move-to-location trigger) failed gle=%lu", gle);
+    return FALSE;
+  }
+
+  const DWORD wait_rc = WaitForSingleObject(g_state.pending_move.event, kDispatchTimeoutMs);
+  const LONG result = InterlockedCompareExchange(&g_state.pending_move.result, 0, 0);
+  const DWORD last_error = static_cast<DWORD>(InterlockedCompareExchange(&g_state.pending_move.last_error, 0, 0));
+  InterlockedExchange(&g_state.pending_move.busy, 0);
+
+  if (wait_rc != WAIT_OBJECT_0) {
+    const DWORD gle = (wait_rc == WAIT_TIMEOUT) ? WAIT_TIMEOUT : GetLastError();
+    if (out_rc != nullptr) {
+      *out_rc = result;
+    }
+    if (out_error != nullptr) {
+      *out_error = gle;
+    }
+    UpdateLastOperation(0, result, gle);
+    LogMessage(
+        kLogError,
+        "move-to-location dispatch wait failed wait_rc=%lu gle=%lu result=%ld",
+        static_cast<unsigned long>(wait_rc),
+        static_cast<unsigned long>(gle),
+        result);
+    return FALSE;
+  }
+
+  if (out_rc != nullptr) {
+    *out_rc = result;
+  }
+  if (out_error != nullptr) {
+    *out_error = last_error;
+  }
+  return last_error == ERROR_SUCCESS && result != 0;
+}
+
+BOOL TriggerSetWalkNoWalkBypass(BOOL enabled, DWORD* out_error) {
+  if (!EnsureHookInstalled()) {
+    const DWORD gle = GetLastError();
+    if (out_error != nullptr) {
+      *out_error = gle;
+    }
+    return FALSE;
+  }
+
+  if (InterlockedCompareExchange(&g_state.pending_walk_bypass.busy, 1, 0) != 0) {
+    if (out_error != nullptr) {
+      *out_error = ERROR_BUSY;
+    }
+    LogMessage(kLogError, "set walk no-walk bypass rejected because a previous request is still in flight");
+    return FALSE;
+  }
+
+  const LONG request_id = InterlockedIncrement(&g_state.pending_walk_bypass.sequence_seed);
+  InterlockedExchange(&g_state.pending_walk_bypass.request_id, request_id);
+  InterlockedExchange(&g_state.pending_walk_bypass.enabled, enabled ? 1 : 0);
+  InterlockedExchange(&g_state.pending_walk_bypass.result, 0);
+  InterlockedExchange(&g_state.pending_walk_bypass.last_error, ERROR_IO_PENDING);
+  ResetEvent(g_state.pending_walk_bypass.event);
+
+  if (!PostMessageA(g_state.hwnd, kMsgSetWalkBypass, 0, static_cast<LPARAM>(request_id))) {
+    const DWORD gle = GetLastError();
+    InterlockedExchange(&g_state.pending_walk_bypass.busy, 0);
+    if (out_error != nullptr) {
+      *out_error = gle;
+    }
+    LogMessage(kLogError, "PostMessageA(set walk no-walk bypass) failed gle=%lu", gle);
+    return FALSE;
+  }
+
+  const DWORD wait_rc = WaitForSingleObject(g_state.pending_walk_bypass.event, kDispatchTimeoutMs);
+  const LONG result = InterlockedCompareExchange(&g_state.pending_walk_bypass.result, 0, 0);
+  const DWORD last_error = static_cast<DWORD>(InterlockedCompareExchange(&g_state.pending_walk_bypass.last_error, 0, 0));
+  InterlockedExchange(&g_state.pending_walk_bypass.busy, 0);
+
+  if (wait_rc != WAIT_OBJECT_0) {
+    const DWORD gle = (wait_rc == WAIT_TIMEOUT) ? WAIT_TIMEOUT : GetLastError();
+    if (out_error != nullptr) {
+      *out_error = gle;
+    }
+    LogMessage(
+        kLogError,
+        "set walk no-walk bypass wait failed wait_rc=%lu gle=%lu result=%ld",
+        static_cast<unsigned long>(wait_rc),
+        static_cast<unsigned long>(gle),
+        result);
+    return FALSE;
+  }
+
+  if (out_error != nullptr) {
+    *out_error = last_error;
+  }
+  return last_error == ERROR_SUCCESS && result != 0;
+}
+
 BOOL RefreshCharacterIdentity(DWORD* out_error) {
   if (!EnsureHookInstalled()) {
     const DWORD gle = GetLastError();
@@ -3382,6 +3881,10 @@ BOOL HandlePipeClient(HANDLE pipe) {
             static_cast<uint32_t>(InterlockedCompareExchange(&g_state.quickbar_equipped_mask_low, 0, 0));
         response.quickbar_equipped_mask_high =
             static_cast<uint32_t>(InterlockedCompareExchange(&g_state.quickbar_equipped_mask_high, 0, 0));
+        response.position_valid = TryReadCurrentPlayerPosition(
+            &response.position_x,
+            &response.position_y,
+            &response.position_z) ? 1 : 0;
         CopyStoredCharacterName(response.character_name, ARRAYSIZE(response.character_name));
 
         if (!WriteResponse(pipe, kOpQuery, &response, sizeof(response))) {
@@ -3436,6 +3939,75 @@ BOOL HandlePipeClient(HANDLE pipe) {
         }
 
         if (!WriteResponse(pipe, kOpChatSend, &response, sizeof(response))) {
+          return FALSE;
+        }
+        break;
+      }
+
+      case kOpMoveToLocation: {
+        MoveToLocationResponse response = {};
+        if (header.size != kMoveToLocationRequestLegacySize && header.size != sizeof(MoveToLocationRequest)) {
+          response.last_error = ERROR_INVALID_DATA;
+          UpdateLastOperation(0, 0, ERROR_INVALID_DATA);
+        } else {
+          MoveToLocationRequest request = {};
+          memcpy(&request, payload, header.size);
+          LONG rc = 0;
+          DWORD last_error = ERROR_SUCCESS;
+          response.x = request.x;
+          response.y = request.y;
+          response.z = request.z;
+          response.success = TriggerMoveToLocation(
+              request.x,
+              request.y,
+              request.z,
+              request.client_side,
+              request.action_object_id,
+              request.bypass_no_walk,
+              &rc,
+              &last_error) ? 1 : 0;
+          response.rc = rc;
+          response.last_error = static_cast<int32_t>(last_error);
+          LogMessage(
+              response.success ? kLogInfo : kLogError,
+              "move-to-location request x=%.3f y=%.3f z=%.3f bypassNoWalk=%ld success=%ld rc=%ld err=%ld",
+              static_cast<double>(response.x),
+              static_cast<double>(response.y),
+              static_cast<double>(response.z),
+              request.bypass_no_walk ? 1L : 0L,
+              response.success,
+              response.rc,
+              response.last_error);
+        }
+
+        if (!WriteResponse(pipe, kOpMoveToLocation, &response, sizeof(response))) {
+          return FALSE;
+        }
+        break;
+      }
+
+      case kOpSetWalkBypass: {
+        WalkBypassResponse response = {};
+        if (header.size != sizeof(WalkBypassRequest)) {
+          response.last_error = ERROR_INVALID_DATA;
+          UpdateLastOperation(0, 0, ERROR_INVALID_DATA);
+        } else {
+          WalkBypassRequest request = {};
+          memcpy(&request, payload, sizeof(request));
+          DWORD last_error = ERROR_SUCCESS;
+          response.success = TriggerSetWalkNoWalkBypass(request.enabled ? TRUE : FALSE, &last_error) ? 1 : 0;
+          response.enabled = static_cast<int32_t>(InterlockedCompareExchange(&g_state.walk_no_walk_bypass_enabled, 0, 0));
+          response.last_error = static_cast<int32_t>(last_error);
+          LogMessage(
+              response.success ? kLogInfo : kLogError,
+              "set walk no-walk bypass request enabled=%ld active=%ld success=%ld err=%ld",
+              request.enabled ? 1L : 0L,
+              response.enabled,
+              response.success,
+              response.last_error);
+        }
+
+        if (!WriteResponse(pipe, kOpSetWalkBypass, &response, sizeof(response))) {
           return FALSE;
         }
         break;
@@ -3830,8 +4402,62 @@ SIMKEYS_API DWORD WINAPI InitSimKeys(LPVOID) {
     return 0;
   }
 
+  g_state.pending_move.event = CreateEventA(nullptr, FALSE, FALSE, nullptr);
+  if (g_state.pending_move.event == nullptr) {
+    CloseHandle(g_state.pending_identity.event);
+    g_state.pending_identity.event = nullptr;
+    CloseHandle(g_state.pending_chat.event);
+    g_state.pending_chat.event = nullptr;
+    CloseHandle(g_state.pending.event);
+    g_state.pending.event = nullptr;
+    if (g_state.log_file != nullptr) {
+      CloseHandle(g_state.log_file);
+      g_state.log_file = nullptr;
+    }
+    g_state.overlay_lock_ready = false;
+    DeleteCriticalSection(&g_state.overlay_lock);
+    g_state.log_lock_ready = false;
+    DeleteCriticalSection(&g_state.log_lock);
+    g_state.chat_lock_ready = false;
+    DeleteCriticalSection(&g_state.chat_lock);
+    g_state.lock_ready = false;
+    DeleteCriticalSection(&g_state.lock);
+    g_state.initialized = 0;
+    return 0;
+  }
+
+  g_state.pending_walk_bypass.event = CreateEventA(nullptr, FALSE, FALSE, nullptr);
+  if (g_state.pending_walk_bypass.event == nullptr) {
+    CloseHandle(g_state.pending_move.event);
+    g_state.pending_move.event = nullptr;
+    CloseHandle(g_state.pending_identity.event);
+    g_state.pending_identity.event = nullptr;
+    CloseHandle(g_state.pending_chat.event);
+    g_state.pending_chat.event = nullptr;
+    CloseHandle(g_state.pending.event);
+    g_state.pending.event = nullptr;
+    if (g_state.log_file != nullptr) {
+      CloseHandle(g_state.log_file);
+      g_state.log_file = nullptr;
+    }
+    g_state.overlay_lock_ready = false;
+    DeleteCriticalSection(&g_state.overlay_lock);
+    g_state.log_lock_ready = false;
+    DeleteCriticalSection(&g_state.log_lock);
+    g_state.chat_lock_ready = false;
+    DeleteCriticalSection(&g_state.chat_lock);
+    g_state.lock_ready = false;
+    DeleteCriticalSection(&g_state.lock);
+    g_state.initialized = 0;
+    return 0;
+  }
+
   g_state.pipe_ready_event = CreateEventA(nullptr, TRUE, FALSE, nullptr);
   if (g_state.pipe_ready_event == nullptr) {
+    CloseHandle(g_state.pending_walk_bypass.event);
+    g_state.pending_walk_bypass.event = nullptr;
+    CloseHandle(g_state.pending_move.event);
+    g_state.pending_move.event = nullptr;
     CloseHandle(g_state.pending_identity.event);
     g_state.pending_identity.event = nullptr;
     CloseHandle(g_state.pending_chat.event);
@@ -3859,6 +4485,10 @@ SIMKEYS_API DWORD WINAPI InitSimKeys(LPVOID) {
   if (g_state.pipe_thread == nullptr) {
     CloseHandle(g_state.pipe_ready_event);
     g_state.pipe_ready_event = nullptr;
+    CloseHandle(g_state.pending_walk_bypass.event);
+    g_state.pending_walk_bypass.event = nullptr;
+    CloseHandle(g_state.pending_move.event);
+    g_state.pending_move.event = nullptr;
     CloseHandle(g_state.pending_identity.event);
     g_state.pending_identity.event = nullptr;
     CloseHandle(g_state.pending_chat.event);

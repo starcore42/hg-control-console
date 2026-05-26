@@ -10,6 +10,8 @@ from src.simkeys_app.simkeys_script_host import (
     AutoAttackScript,
     AutoDrinkScript,
     AutoFollowScript,
+    AlwaysOnScript,
+    CoordinateFollowScript,
     ChatLineEvent,
     ClientScriptBase,
     ClientScriptHost,
@@ -39,7 +41,13 @@ class FakeHost:
         self.chats = []
         self.overlays = []
         self.slots = []
+        self.moves = []
+        self.move_bypass_flags = []
+        self.walk_bypass_calls = []
+        self.walk_bypass_enabled = False
         self.mask = 1 << 0
+        self.position = (10.0, 20.0, 0.0)
+        self.position_valid = True
         self.recovery_until = 0.0
         self.recovery_reason = ""
         self.auto_attack_pause_until = 0.0
@@ -69,7 +77,25 @@ class FakeHost:
         return {"success": 1, "rc": 0, "aux_rc": 0, "path": 1, "err": 0}
 
     def query_state(self):
-        return {"quickbar_equipped_mask": self.mask}
+        return {
+            "quickbar_equipped_mask": self.mask,
+            "position_valid": self.position_valid,
+            "position": self.position if self.position_valid else None,
+            "position_x": self.position[0],
+            "position_y": self.position[1],
+            "position_z": self.position[2],
+        }
+
+    def move_to_location(self, x, y, z, bypass_no_walk=False):
+        self.moves.append((float(x), float(y), float(z)))
+        self.move_bypass_flags.append(bool(bypass_no_walk))
+        self.position = (float(x), float(y), float(z))
+        return {"success": 1, "rc": 1, "err": 0}
+
+    def set_walk_bypass(self, enabled):
+        self.walk_bypass_calls.append(bool(enabled))
+        self.walk_bypass_enabled = bool(enabled)
+        return {"success": 1, "enabled": self.walk_bypass_enabled, "err": 0}
 
     def show_overlay_text(self, text, **kwargs):
         self.overlays.append((text, kwargs))
@@ -612,6 +638,280 @@ class ChatEventTests(unittest.TestCase):
         drink._poll_health_once()
         self.assertEqual(host.slots, [])
         self.assertIn("Paused", drink.status_text)
+
+    def test_coordinate_follow_spam_moves_to_published_lead_position(self):
+        lead_host = FakeHost()
+        lead_host.client.pid = 100
+        lead_host.client.character_name = "Starcore-Lead [1.0]"
+        lead_host.client.display_name = "Starcore-Lead [1.0]"
+        lead_host.position = (100.0, 200.0, 3.0)
+        lead = CoordinateFollowScript(
+            lead_host.client,
+            {"role": CoordinateFollowScript.ROLE_LEAD, "position_poll_interval": 0.05},
+            lead_host,
+        )
+
+        follower_host = FakeHost()
+        follower_host.client.pid = 101
+        follower_host.client.character_name = "Starcore-Follower [1.0]"
+        follower_host.client.display_name = "Starcore-Follower [1.0]"
+        follower_host.position = (10.0, 20.0, 0.0)
+        follower = CoordinateFollowScript(
+            follower_host.client,
+            {
+                "role": CoordinateFollowScript.ROLE_FOLLOWER,
+                "follow_interval_seconds": 0.1,
+                "distance_threshold": 0.1,
+                "formation_radius": 0.0,
+                "combat_grace_seconds": 0.0,
+            },
+            follower_host,
+        )
+
+        try:
+            lead.on_start()
+            lead.on_tick()
+            follower.on_start()
+            follower.on_tick()
+
+            self.assertEqual(follower_host.moves, [(100.0, 200.0, 3.0)])
+            self.assertIn("Moved", follower.status_text)
+        finally:
+            follower.on_stop()
+            lead.on_stop()
+
+    def test_coordinate_follow_can_bypass_client_no_walk(self):
+        lead_host = FakeHost()
+        lead_host.client.pid = 110
+        lead_host.client.character_name = "Starcore-Lead [1.0]"
+        lead_host.client.display_name = "Starcore-Lead [1.0]"
+        lead_host.position = (100.0, 200.0, 3.0)
+        lead = CoordinateFollowScript(
+            lead_host.client,
+            {"role": CoordinateFollowScript.ROLE_LEAD, "position_poll_interval": 0.05},
+            lead_host,
+        )
+
+        follower_host = FakeHost()
+        follower_host.client.pid = 111
+        follower_host.client.character_name = "Starcore-Follower [1.0]"
+        follower_host.client.display_name = "Starcore-Follower [1.0]"
+        follower_host.position = (10.0, 20.0, 0.0)
+        follower = CoordinateFollowScript(
+            follower_host.client,
+            {
+                "role": CoordinateFollowScript.ROLE_FOLLOWER,
+                "follow_interval_seconds": 0.1,
+                "distance_threshold": 0.0,
+                "formation_radius": 0.0,
+                "combat_grace_seconds": 0.0,
+                "bypass_no_walk": True,
+            },
+            follower_host,
+        )
+
+        try:
+            lead.on_start()
+            lead.on_tick()
+            follower.on_start()
+            follower.on_tick()
+
+            self.assertEqual(follower_host.moves, [(100.0, 200.0, 3.0)])
+            self.assertEqual(follower_host.move_bypass_flags, [True])
+            self.assertEqual(follower_host.walk_bypass_calls, [True])
+            self.assertTrue(follower.walk_bypass_active)
+        finally:
+            follower.on_stop()
+            lead.on_stop()
+        self.assertEqual(follower_host.walk_bypass_calls, [True, False])
+        self.assertFalse(follower_host.walk_bypass_enabled)
+
+    def test_coordinate_follow_radius_uses_nearby_target(self):
+        lead_host = FakeHost()
+        lead_host.client.pid = 120
+        lead_host.client.character_name = "Starcore-Lead [1.0]"
+        lead_host.client.display_name = "Starcore-Lead [1.0]"
+        lead_host.position = (100.0, 200.0, 3.0)
+        lead = CoordinateFollowScript(
+            lead_host.client,
+            {"role": CoordinateFollowScript.ROLE_LEAD, "position_poll_interval": 0.05},
+            lead_host,
+        )
+
+        follower_host = FakeHost()
+        follower_host.client.pid = 121
+        follower_host.client.character_name = "Starcore-Follower [1.0]"
+        follower_host.client.display_name = "Starcore-Follower [1.0]"
+        follower_host.position = (10.0, 20.0, 0.0)
+        follower = CoordinateFollowScript(
+            follower_host.client,
+            {
+                "role": CoordinateFollowScript.ROLE_FOLLOWER,
+                "follow_interval_seconds": 0.1,
+                "distance_threshold": 0.0,
+                "combat_grace_seconds": 0.0,
+                "formation_radius": 0.5,
+            },
+            follower_host,
+        )
+
+        try:
+            lead.on_start()
+            lead.on_tick()
+            follower.on_start()
+            follower.on_tick()
+
+            self.assertEqual(len(follower_host.moves), 1)
+            x, y, z = follower_host.moves[0]
+            self.assertAlmostEqual(((x - 100.0) ** 2 + (y - 200.0) ** 2) ** 0.5, 0.5, places=5)
+            self.assertEqual(z, 3.0)
+        finally:
+            follower.on_stop()
+            lead.on_stop()
+
+    def test_coordinate_follow_spam_pauses_during_any_recent_attack_line(self):
+        lead_host = FakeHost()
+        lead_host.client.pid = 300
+        lead_host.client.character_name = "Starcore-Lead [1.0]"
+        lead_host.client.display_name = "Starcore-Lead [1.0]"
+        lead_host.position = (80.0, 90.0, 2.0)
+        lead = CoordinateFollowScript(
+            lead_host.client,
+            {"role": CoordinateFollowScript.ROLE_LEAD, "position_poll_interval": 0.05},
+            lead_host,
+        )
+
+        follower_host = FakeHost()
+        follower_host.client.pid = 301
+        follower_host.client.character_name = "Starcore-Follower [1.0]"
+        follower_host.client.display_name = "Starcore-Follower [1.0]"
+        follower = CoordinateFollowScript(
+            follower_host.client,
+            {
+                "role": CoordinateFollowScript.ROLE_FOLLOWER,
+                "follow_interval_seconds": 0.1,
+                "distance_threshold": 0.1,
+                "combat_grace_seconds": 5.0,
+            },
+            follower_host,
+        )
+
+        try:
+            lead.on_start()
+            lead.on_tick()
+            follower.on_start()
+            follower.on_chat_event(parse_chat_line_event(1, "Balor attacks Dummy : *hit*"))
+            follower.on_tick()
+
+            self.assertEqual(follower_host.moves, [])
+            self.assertIn("combat", follower.status_text.lower())
+        finally:
+            follower.on_stop()
+            lead.on_stop()
+
+    def test_coordinate_follow_spam_pauses_during_any_recent_damage_line(self):
+        lead_host = FakeHost()
+        lead_host.client.pid = 310
+        lead_host.client.character_name = "Starcore-Lead [1.0]"
+        lead_host.client.display_name = "Starcore-Lead [1.0]"
+        lead_host.position = (80.0, 90.0, 2.0)
+        lead = CoordinateFollowScript(
+            lead_host.client,
+            {"role": CoordinateFollowScript.ROLE_LEAD, "position_poll_interval": 0.05},
+            lead_host,
+        )
+
+        follower_host = FakeHost()
+        follower_host.client.pid = 311
+        follower_host.client.character_name = "Starcore-Follower [1.0]"
+        follower_host.client.display_name = "Starcore-Follower [1.0]"
+        follower = CoordinateFollowScript(
+            follower_host.client,
+            {
+                "role": CoordinateFollowScript.ROLE_FOLLOWER,
+                "follow_interval_seconds": 0.1,
+                "distance_threshold": 0.1,
+                "combat_grace_seconds": 5.0,
+            },
+            follower_host,
+        )
+
+        try:
+            lead.on_start()
+            lead.on_tick()
+            follower.on_start()
+            follower.on_chat_event(parse_chat_line_event(1, "Balor damages Dummy : 12 (12 physical)"))
+            follower.on_tick()
+
+            self.assertEqual(follower_host.moves, [])
+            self.assertIn("combat", follower.status_text.lower())
+        finally:
+            follower.on_stop()
+            lead.on_stop()
+
+    def test_coordinate_follow_ignores_nonfatal_move_rejection(self):
+        lead_host = FakeHost()
+        lead_host.client.pid = 400
+        lead_host.client.character_name = "Starcore-Lead [1.0]"
+        lead_host.client.display_name = "Starcore-Lead [1.0]"
+        lead_host.position = (80.0, 90.0, 2.0)
+        lead = CoordinateFollowScript(
+            lead_host.client,
+            {"role": CoordinateFollowScript.ROLE_LEAD, "position_poll_interval": 0.05},
+            lead_host,
+        )
+
+        follower_host = FakeHost()
+        follower_host.client.pid = 401
+        follower_host.client.character_name = "Starcore-Follower [1.0]"
+        follower_host.client.display_name = "Starcore-Follower [1.0]"
+        follower_host.move_to_location = lambda x, y, z, bypass_no_walk=False: {"success": 0, "rc": 0, "err": 31}
+        follower = CoordinateFollowScript(
+            follower_host.client,
+            {
+                "role": CoordinateFollowScript.ROLE_FOLLOWER,
+                "follow_interval_seconds": 0.1,
+                "distance_threshold": 0.0,
+                "combat_grace_seconds": 0.0,
+            },
+            follower_host,
+        )
+
+        try:
+            lead.on_start()
+            lead.on_tick()
+            follower.on_start()
+            follower.on_tick()
+
+            self.assertIn("skipped", follower.status_text.lower())
+            self.assertFalse([event for event in follower_host.events if event[0] == "error"])
+        finally:
+            follower.on_stop()
+            lead.on_stop()
+
+    def test_basic_functions_follow_is_suppressed_for_coordinate_lead(self):
+        host = FakeHost()
+        host.client.pid = 500
+        host.client.character_name = "Starcore-Lead [1.0]"
+        host.client.display_name = "Starcore-Lead [1.0]"
+        host.position = (1.0, 2.0, 0.0)
+        lead = CoordinateFollowScript(
+            host.client,
+            {"role": CoordinateFollowScript.ROLE_LEAD, "position_poll_interval": 0.05},
+            host,
+        )
+        always_on = AlwaysOnScript(host.client, {"disable_follow": False}, host)
+
+        try:
+            lead.on_start()
+            lead.on_tick()
+            always_on.on_start()
+            always_on.on_chat_line(1, "Starcore-Other [1.0]: follow me")
+
+            self.assertEqual(host.chats, [])
+        finally:
+            always_on.on_stop()
+            lead.on_stop()
 
     def test_autodrink_echo_uses_client_echo_command(self):
         host = FakeHost()
