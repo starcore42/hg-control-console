@@ -8679,7 +8679,16 @@ class ScriptManager:
                     width=6,
                     help_text="How far from the lead's exact XYZ the follower aims. 0 stacks directly on the lead; larger values form a small ring around them.",
                 ),
-                ScriptField("bypass_no_walk", "Bypass No-Walk", "bool", True),
+                ScriptField(
+                    "bypass_no_walk",
+                    "Bypass No-Walk",
+                    "bool",
+                    True,
+                    help_text=(
+                        "Keeps Diamond's local gui_nowalk check bypassed while Coordinate Follow is running, "
+                        "so a follower can send a walk packet even when the client thinks the exact coordinate is occupied."
+                    ),
+                ),
                 ScriptField(
                     "combat_grace_seconds",
                     "Combat Pause",
@@ -8689,7 +8698,7 @@ class ScriptManager:
                     maximum=30.0,
                     step=0.5,
                     width=7,
-                    help_text="How many seconds after this follower appears in attack or damage log lines before timer movement resumes.",
+                    help_text="How many seconds after any parsed attack or damage line before timer movement resumes.",
                 ),
                 ScriptField("position_poll_interval", "Lead Poll", "float", 0.25, minimum=0.05, maximum=2.0, step=0.05, width=6),
                 ScriptField("lead_stale_seconds", "Stale", "float", 3.0, minimum=0.25, maximum=30.0, step=0.25, width=6),
@@ -8704,12 +8713,6 @@ class ScriptManager:
                 "Start Follower makes the selected client move toward that lead on the timer while out of combat.\n\n"
                 "The Lead checkbox beside Saved marks the selected character as the lead used by Start Saved, and only one "
                 "character can have that saved lead role at a time. Checking it also enables Coordinate Follow in Saved for that character.\n\n"
-                "Interval is how often followers re-issue movement. Distance is how close a follower can be to its assigned "
-                "destination before it stops sending moves. Radius offsets followers around the lead; 0, the default, aims "
-                "directly at the lead's exact coordinates, while larger values keep a close but less collision-prone ring.\n\n"
-                "Bypass No-Walk keeps Diamond's local gui_nowalk check bypassed while this script is running, so the client can "
-                "send a walk packet even when it thinks the exact coordinate is occupied. Combat Pause prevents timer movement "
-                "for that many seconds after the follower appears in attack or damage log lines.\n\n"
                 "Debug / Advanced: Lead Poll controls how often the lead publishes XYZ. Stale is how old a lead position may be "
                 "before followers ignore it. Poll, Batch, Backlog, and Echo are chat/debug plumbing and usually do not need changes."
             ),
