@@ -5878,6 +5878,9 @@ class AutoActionScript(ClientScriptBase):
         "Taunt": ("!action attack+tau opponent", "Taunt"),
     }
 
+    MODE_CHOICES = tuple(MODE_CONFIG.keys())
+
+
     def __init__(self, client, config: Dict[str, object], host):
         super().__init__(client, config, host)
         self.enabled = False
@@ -8622,13 +8625,13 @@ class ScriptManager:
             name="Auto Action",
             description="Repeatedly issue the selected combat action on its cooldown.",
             fields=[
-                ScriptField("mode", "Mode", "choice", "Called Shot", choices=["Called Shot", "Knockdown", "Disarm", "Taunt"], width=12),
+                ScriptField("mode", "Mode", "choice", "Called Shot", choices=list(AutoActionScript.MODE_CHOICES), width=12),
                 ScriptField("cooldown_seconds", "Cooldown", "float", 6.2, minimum=0.1, maximum=30.0, step=0.1, width=6),
             ],
             factory=AutoActionScript,
             details=(
                 "Auto Action repeatedly sends one selected HG action command against the current opponent on a fixed "
-                "cooldown. It is a lightweight helper for abilities like Called Shot, Knockdown, or Disarm and does not "
+                "cooldown. It is a lightweight helper for abilities like Called Shot, Knockdown, Disarm or Taunt and does not "
                 "need combat-log parsing to run."
             ),
         )
