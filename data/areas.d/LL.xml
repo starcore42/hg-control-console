@@ -1,0 +1,103 @@
+<?xml version="1.0" encoding="utf-8"?>
+<runs>
+    <area name="Catacombs of Dulvuroth - Lower Level" run="Catacombs of Dulvuroth">
+		<pin x="35.84" y="8.72" text="Search spot" />
+	</area>
+	<area name="Catacombs of Dulvuroth - Upper Level" run="Catacombs of Dulvuroth">
+		<pin x="88.52" y="88.61" text="Search spot" />
+	</area>
+	<area name="Tragidore - Herald's Pit" run="Tragidore">
+		<pin x="22.52" y="21.39" text="Search spot" />
+		<pin x="30.11" y="77.80" text="Search spot" />
+		<pin x="8.82" y="58.21" text="Search spot" />
+	</area>
+	<area name="Tragidore - Village Environs" run="Tragidore">
+		<pin x="153.92" y="95.84" text="Search spot" />
+		<pin x="100.76" y="70.61" text="Search spot" />
+		<pin x="35.52" y="75.21" text="Search spot" />
+		<pin x="64.36" y="68.34" text="Search spot" />
+		<pin x="117.75" y="17.87" text="Search spot" />
+		<pin x="43.01" y="175.49" text="Search spot" />
+		<pin x="130.54" y="158.46" text="Search spot" />
+	</area>
+	<area name="Toyshop - Supply Mine" run="Toyshop">
+		<pin x="87.00" y="74.86" text="Secret area" />
+	</area>
+	<area name="Toyshop - Outer Workshop" run="Toyshop">
+		<pin x="38.33" y="86.41" text="Search spot" />
+		<pin x="76.93" y="52.44" text="Search spot" />
+	</area>
+	<area name="Locathah - Sulfurous Current" run="Locathah">
+		<pin x="36.85" y="11.50" text="Search spot" />
+		<pin x="32.43" y="5.92" text="Search spot" />
+	</area>
+	<area name="Locathah - Sunken Fane of Eadro" run="Locathah">
+		<pin x="67.72" y="64.67" text="Search spot" />
+	</area>
+	<area name="Rona - Forest Floor" run="Rona">
+		<pin x="67.72" y="64.67" text="Search spot" />
+	</area>
+	<area name="Rona - Temple of Tsanje" run="Rona">
+		<pin x="61.82" y="44.62" text="Search spot" />
+	</area>
+	<area name="Arcane Archive - Sealed Chasm" run="Arcane Archive">
+		<pin x="73.45" y="95.35" text="Search spot" />
+		<pin x="34.64" y="36.31" text="Search spot" />
+		<pin x="85.73" y="12.62" text="Search spot" />
+	</area>
+	<area name="Arcane Archive - Stacks" run="Arcane Archive">
+		<pin x="87.86" y="155.91" text="Search spot" />
+		<pin x="107.55" y="131.11" text="Search spot" />
+		<pin x="31.47" y="33.77" text="Search spot" />
+		<pin x="3.81" y="122.22" text="Search spot" />
+	</area>
+	<area name="Arcane Archive - Rift Fortress" run="Arcane Archive">
+		<pin x="14.29" y="70.98" text="Search spot" />
+		<pin x="103.60" y="49.39" text="Search spot" />
+	</area>
+	<area name="Black Pyramid - Chamber of the Four" run="Pyramid">
+		<pin x="2.40" y="33.44" text="Secret Area" />
+		<pin x="45.94" y="58.58" text="Secret Area" />
+	</area>
+	<area name="Pit of Moliation - Dark Descent" run="Pit of Moliation">
+		<pin x="51.90" y="33.45" text="Search Spot" />
+	</area>
+	<area name="Pit of Moliation - First Deep" run="Pit of Moliation">
+		<pin x="105.23" y="48.36" text="Search Spot" />
+		<pin x="52.15" y="5.66" text="Search Spot" />
+		<pin x="51.05" y="5.40" text="Search Spot" />
+	</area>
+	<area name="Pit of Moliation - Second Deep" run="Pit of Moliation">
+		<pin x="71.67" y="63.73" text="Search Spot" />
+		<pin x="21.93" y="9.74" text="Search Spot" />
+		<pin x="16.33" y="78.44" text="Search Spot" />
+		<pin x="61.38" y="5.14" text="Search Spot" />
+	</area>
+	<area name="Pit of Moliation - Heart of Change" run="Pit of Moliation">
+		<pin x="33.98" y="16.95" text="Search Spot" />
+		<pin x="2.62" y="107.21" text="Search Spot" />
+		<pin x="80.65" y="56.27" text="Search Spot" />
+	</area>
+	<area name="Urobos Peak - Lost Temple" run="Urobos">
+		<pin x="116.32" y="52.27" text="Search Spot" />
+	</area>
+	<area name="Urobos Peak - Lost Temple" run="Urobos">
+		<pin x="116.54" y="12.44" text="Secret Area" />
+	</area>
+	<area name="Hive - Twisting Tunnels" run="Hive">
+		<pin x="14.63" y="60.72" text="Search Spot" />
+		<pin x="25.47" y="5.90" text="Search Spot" />
+		<pin x="76.90" y="78.79" text="Search Spot" />
+	</area>
+	<area name="Hive - Larvalium" run="Hive">
+		<pin x="27.93" y="39.13" text="Search Spot" />
+		<pin x="16.07" y="74.83" text="Search Spot" />
+		<pin x="73.07" y="34.35" text="Search Spot" />
+	</area>
+	<area name="Hive - Queen's Cavern" run="Hive">
+		<pin x="58.84" y="72.59" text="Search Spot" />
+		<pin x="10.63" y="13.40" text="Search Spot" />
+	</area>
+	
+</runs>
+

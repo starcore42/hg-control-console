@@ -31,6 +31,7 @@ constexpr UINT kOpOverlayClearAll = 3011;
 constexpr UINT kOpMoveToLocation = 3012;
 constexpr UINT kOpSetWalkBypass = 3013;
 constexpr UINT kOpSetActionMode = 3014;
+constexpr UINT kOpMapPin = 3015;
 
 constexpr UINT kMsgTriggerVk = WM_APP + 0x491;
 constexpr UINT kMsgSendChat = WM_APP + 0x492;
@@ -39,6 +40,7 @@ constexpr UINT kMsgTriggerPageSlot = WM_APP + 0x494;
 constexpr UINT kMsgMoveToLocation = WM_APP + 0x495;
 constexpr UINT kMsgSetWalkBypass = WM_APP + 0x496;
 constexpr UINT kMsgSetActionMode = WM_APP + 0x497;
+constexpr UINT kMsgAddMapPin = WM_APP + 0x498;
 constexpr DWORD kPipeBufferSize = 65536;
 constexpr DWORD kDispatchTimeoutMs = 2000;
 constexpr DWORD kPipeStartupTimeoutMs = 2000;
@@ -61,8 +63,10 @@ constexpr UINT kExpectedItemEquippedOwnerResolver = 0x004E9B50;
 constexpr UINT kExpectedChatSend = 0x0057C9F0;
 constexpr UINT kExpectedChatWindowLog = 0x00493BD0;
 constexpr UINT kExpectedAppObjectResolver = 0x00405160;
+constexpr UINT kExpectedClientGuiMessageResolver = 0x00407B70;
 constexpr UINT kExpectedCurrentPlayerResolver = 0x00407850;
 constexpr UINT kExpectedPlayerNameBuilder = 0x004CEF20;
+constexpr UINT kExpectedNwnStringConstructFromCString = 0x005BA260;
 constexpr UINT kExpectedNwnStringDestroy = 0x005BA420;
 constexpr UINT kExpectedWalkToWaypoint = 0x00407D70;
 constexpr UINT kExpectedToggleModeInput = 0x004D00B0;
@@ -89,6 +93,8 @@ constexpr int kQuickbarPageCount = 3;
 constexpr int kQuickbarSlotCount = 12;
 constexpr int kActionModeDefensiveCast = 10;
 constexpr int kPendingChatCapacity = 1024;
+constexpr int kMapPinTextCapacity = 512;
+constexpr int kMapPinXmlCapacity = 1024;
 constexpr int kChatQueueCapacity = 1024;
 constexpr int kChatTextCapacity = 768;
 constexpr int kCharacterNameCapacity = 128;
@@ -194,6 +200,18 @@ struct TriggerResponse {
 struct ChatSendResponse {
   int32_t success;
   int32_t mode;
+  int32_t rc;
+  int32_t last_error;
+};
+
+struct MapPinRequestHeader {
+  float x;
+  float y;
+  int32_t text_length;
+};
+
+struct MapPinResponse {
+  int32_t success;
   int32_t rc;
   int32_t last_error;
 };
@@ -323,6 +341,18 @@ struct PendingCombatModeDispatch {
   volatile LONG last_error;
 };
 
+struct PendingMapPinDispatch {
+  HANDLE event;
+  volatile LONG busy;
+  volatile LONG sequence_seed;
+  volatile LONG request_id;
+  volatile LONG result;
+  volatile LONG last_error;
+  float x;
+  float y;
+  char text[kMapPinTextCapacity];
+};
+
 struct ChatLineEntry {
   int32_t sequence;
   char text[kChatTextCapacity];
@@ -397,6 +427,7 @@ struct SimKeysState {
   PendingMoveDispatch pending_move;
   PendingWalkBypassDispatch pending_walk_bypass;
   PendingCombatModeDispatch pending_combat_mode;
+  PendingMapPinDispatch pending_map_pin;
   HANDLE log_file;
   char module_path[MAX_PATH];
   char log_path[MAX_PATH];
@@ -2797,6 +2828,170 @@ LONG CallChatSendDirect(const char* text, int mode) {
   return 1;
 }
 
+BOOL AppendMapPinXmlText(char* out, size_t capacity, size_t* offset, const char* text) {
+  if (out == nullptr || offset == nullptr || *offset >= capacity) {
+    SetLastError(ERROR_INVALID_PARAMETER);
+    return FALSE;
+  }
+  const unsigned char* cursor = reinterpret_cast<const unsigned char*>(text != nullptr ? text : "");
+  while (*cursor != '\0') {
+    const char* replacement = nullptr;
+    char single[2] = {static_cast<char>(*cursor), '\0'};
+    switch (*cursor) {
+      case '&':
+        replacement = "&amp;";
+        break;
+      case '<':
+        replacement = "&lt;";
+        break;
+      case '>':
+        replacement = "&gt;";
+        break;
+      case '"':
+        replacement = "&quot;";
+        break;
+      default:
+        replacement = (*cursor < 0x20u && *cursor != '\t') ? "?" : single;
+        break;
+    }
+    const size_t length = strlen(replacement);
+    if (*offset + length >= capacity) {
+      SetLastError(ERROR_BUFFER_OVERFLOW);
+      return FALSE;
+    }
+    CopyMemory(out + *offset, replacement, length);
+    *offset += length;
+    ++cursor;
+  }
+  out[*offset] = '\0';
+  return TRUE;
+}
+
+BOOL AppendMapPinXmlLiteral(char* out, size_t capacity, size_t* offset, const char* text) {
+  if (out == nullptr || offset == nullptr || text == nullptr) {
+    SetLastError(ERROR_INVALID_PARAMETER);
+    return FALSE;
+  }
+  const size_t length = strlen(text);
+  if (*offset + length >= capacity) {
+    SetLastError(ERROR_BUFFER_OVERFLOW);
+    return FALSE;
+  }
+  CopyMemory(out + *offset, text, length);
+  *offset += length;
+  out[*offset] = '\0';
+  return TRUE;
+}
+
+BOOL BuildMapPinXml(float x, float y, const char* text, char* out, size_t capacity) {
+  if (out == nullptr || capacity == 0 || text == nullptr || text[0] == '\0' ||
+      !IsPlausibleCoordinate(x) || !IsPlausibleCoordinate(y)) {
+    SetLastError(ERROR_INVALID_PARAMETER);
+    return FALSE;
+  }
+  const HRESULT hr = StringCchPrintfA(
+      out,
+      capacity,
+      "<pin x=\"%.6f\" y=\"%.6f\" text=\"",
+      static_cast<double>(x),
+      static_cast<double>(y));
+  if (FAILED(hr)) {
+    SetLastError(ERROR_BUFFER_OVERFLOW);
+    return FALSE;
+  }
+  size_t offset = strlen(out);
+  if (!AppendMapPinXmlText(out, capacity, &offset, text) ||
+      !AppendMapPinXmlLiteral(out, capacity, &offset, "\" />")) {
+    return FALSE;
+  }
+  return TRUE;
+}
+
+void DispatchClientGuiMessageRaw(
+    void* target,
+    const void* message,
+    int32_t opcode,
+    int32_t arg0,
+    int32_t arg1,
+    const void* extra) {
+#if defined(_M_IX86)
+  void* dispatch_fn = reinterpret_cast<void*>(RebaseAddress(kExpectedChatWindowLog));
+  __asm {
+    mov esi, extra
+    push dword ptr [esi+12]
+    push dword ptr [esi+8]
+    push dword ptr [esi+4]
+    push dword ptr [esi]
+    push arg1
+    push arg0
+    push opcode
+    mov esi, message
+    push dword ptr [esi+4]
+    push dword ptr [esi]
+    mov ecx, target
+    mov eax, dispatch_fn
+    call eax
+  }
+#else
+  (void)target;
+  (void)message;
+  (void)opcode;
+  (void)arg0;
+  (void)arg1;
+  (void)extra;
+#endif
+}
+
+LONG CallAddMapPinDirect(float x, float y, const char* text) {
+  struct NwnStringRef {
+    char* text;
+    int32_t length;
+  };
+  struct ClientMessageExtra {
+    uint32_t word0;
+    uint32_t word1;
+    uint32_t word2;
+    uint32_t word3;
+  };
+
+  char xml[kMapPinXmlCapacity] = {};
+  if (!BuildMapPinXml(x, y, text, xml, sizeof(xml))) {
+    return 0;
+  }
+
+  const uint32_t app_object = ReadAppObjectPointer();
+  if (app_object == 0) {
+    SetLastError(ERROR_NOT_FOUND);
+    return 0;
+  }
+
+  typedef void* (__thiscall* ResolveClientGuiMessageFn)(void* app_object);
+  typedef NwnStringRef* (__thiscall* ConstructNwnStringFn)(NwnStringRef* text_object, const char* text);
+  const ResolveClientGuiMessageFn resolve_gui =
+      reinterpret_cast<ResolveClientGuiMessageFn>(RebaseAddress(kExpectedClientGuiMessageResolver));
+  const ConstructNwnStringFn construct_string =
+      reinterpret_cast<ConstructNwnStringFn>(RebaseAddress(kExpectedNwnStringConstructFromCString));
+
+  void* target = resolve_gui(reinterpret_cast<void*>(app_object));
+  if (target == nullptr) {
+    SetLastError(ERROR_NOT_FOUND);
+    return 0;
+  }
+
+  NwnStringRef message = {};
+  construct_string(&message, xml);
+  if (message.text == nullptr) {
+    SetLastError(ERROR_OUTOFMEMORY);
+    return 0;
+  }
+
+  ClientMessageExtra extra = {};
+  DispatchClientGuiMessageRaw(target, &message, 0x80, 0, 0, &extra);
+  LogMessage(kLogInfo, "map pin dispatched x=%.3f y=%.3f text=%s", static_cast<double>(x), static_cast<double>(y), text);
+  SetLastError(ERROR_SUCCESS);
+  return 1;
+}
+
 BOOL InstallWalkNoWalkBypassPatch(BYTE* original, SIZE_T original_size) {
   if (original == nullptr || original_size < 5) {
     SetLastError(ERROR_INVALID_PARAMETER);
@@ -3599,6 +3794,54 @@ LRESULT CALLBACK SimKeysWndProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM l
     return 0;
   }
 
+  if (message == kMsgAddMapPin) {
+    const LONG request_id = static_cast<LONG>(lparam);
+    if (request_id != InterlockedCompareExchange(&g_state.pending_map_pin.request_id, 0, 0)) {
+      return 0;
+    }
+
+    const float x = g_state.pending_map_pin.x;
+    const float y = g_state.pending_map_pin.y;
+    const char* text = g_state.pending_map_pin.text;
+    DWORD last_error = ERROR_SUCCESS;
+    LONG rc = 0;
+
+    __try {
+      rc = CallAddMapPinDirect(x, y, text);
+      if (rc == 0) {
+        last_error = GetLastError();
+        if (last_error == ERROR_SUCCESS) {
+          last_error = ERROR_GEN_FAILURE;
+        }
+      }
+      LogMessage(
+          last_error == ERROR_SUCCESS ? kLogInfo : kLogError,
+          "map pin dispatched x=%.3f y=%.3f success=%ld rc=%ld err=%lu text=%s",
+          static_cast<double>(x),
+          static_cast<double>(y),
+          rc ? 1L : 0L,
+          rc,
+          static_cast<unsigned long>(last_error),
+          text);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+      last_error = static_cast<DWORD>(GetExceptionCode());
+      rc = 0;
+      LogMessage(
+          kLogError,
+          "map pin raised exception x=%.3f y=%.3f code=0x%08lX text=%s",
+          static_cast<double>(x),
+          static_cast<double>(y),
+          static_cast<unsigned long>(last_error),
+          text);
+    }
+
+    InterlockedExchange(&g_state.pending_map_pin.result, rc);
+    InterlockedExchange(&g_state.pending_map_pin.last_error, static_cast<LONG>(last_error));
+    UpdateLastOperation(0, rc, last_error);
+    SetEvent(g_state.pending_map_pin.event);
+    return 0;
+  }
+
   if (message == kMsgMoveToLocation) {
     const LONG request_id = static_cast<LONG>(lparam);
     if (request_id != InterlockedCompareExchange(&g_state.pending_move.request_id, 0, 0)) {
@@ -4165,6 +4408,99 @@ BOOL TriggerChatMessage(const char* text, int mode, LONG* out_rc, DWORD* out_err
   return last_error == ERROR_SUCCESS;
 }
 
+BOOL TriggerAddMapPin(float x, float y, const char* text, LONG* out_rc, DWORD* out_error) {
+  if (out_rc != nullptr) {
+    *out_rc = 0;
+  }
+  if (out_error != nullptr) {
+    *out_error = ERROR_SUCCESS;
+  }
+
+  if (text == nullptr || text[0] == '\0' || !IsPlausibleCoordinate(x) || !IsPlausibleCoordinate(y)) {
+    if (out_error != nullptr) {
+      *out_error = ERROR_INVALID_PARAMETER;
+    }
+    UpdateLastOperation(0, 0, ERROR_INVALID_PARAMETER);
+    return FALSE;
+  }
+  if (strnlen(text, kMapPinTextCapacity) >= kMapPinTextCapacity - 1) {
+    if (out_error != nullptr) {
+      *out_error = ERROR_BUFFER_OVERFLOW;
+    }
+    UpdateLastOperation(0, 0, ERROR_BUFFER_OVERFLOW);
+    return FALSE;
+  }
+
+  if (!EnsureHookInstalled()) {
+    const DWORD gle = GetLastError();
+    if (out_error != nullptr) {
+      *out_error = gle;
+    }
+    return FALSE;
+  }
+
+  if (InterlockedCompareExchange(&g_state.pending_map_pin.busy, 1, 0) != 0) {
+    if (out_error != nullptr) {
+      *out_error = ERROR_BUSY;
+    }
+    UpdateLastOperation(0, 0, ERROR_BUSY);
+    LogMessage(kLogError, "map pin rejected because a previous map pin dispatch is still in flight");
+    return FALSE;
+  }
+
+  const LONG request_id = InterlockedIncrement(&g_state.pending_map_pin.sequence_seed);
+  g_state.pending_map_pin.x = x;
+  g_state.pending_map_pin.y = y;
+  strncpy_s(g_state.pending_map_pin.text, sizeof(g_state.pending_map_pin.text), text, _TRUNCATE);
+  InterlockedExchange(&g_state.pending_map_pin.request_id, request_id);
+  InterlockedExchange(&g_state.pending_map_pin.result, 0);
+  InterlockedExchange(&g_state.pending_map_pin.last_error, ERROR_IO_PENDING);
+  ResetEvent(g_state.pending_map_pin.event);
+  LogMessage(kLogDebug, "queueing map pin request x=%.3f y=%.3f text=%s", static_cast<double>(x), static_cast<double>(y), text);
+
+  if (!PostMessageA(g_state.hwnd, kMsgAddMapPin, 0, static_cast<LPARAM>(request_id))) {
+    const DWORD gle = GetLastError();
+    InterlockedExchange(&g_state.pending_map_pin.busy, 0);
+    if (out_error != nullptr) {
+      *out_error = gle;
+    }
+    UpdateLastOperation(0, 0, gle);
+    LogMessage(kLogError, "PostMessageA(map pin trigger) failed gle=%lu", gle);
+    return FALSE;
+  }
+
+  const DWORD wait_rc = WaitForSingleObject(g_state.pending_map_pin.event, kDispatchTimeoutMs);
+  const LONG result = InterlockedCompareExchange(&g_state.pending_map_pin.result, 0, 0);
+  const DWORD last_error = static_cast<DWORD>(InterlockedCompareExchange(&g_state.pending_map_pin.last_error, 0, 0));
+  InterlockedExchange(&g_state.pending_map_pin.busy, 0);
+
+  if (wait_rc != WAIT_OBJECT_0) {
+    const DWORD gle = (wait_rc == WAIT_TIMEOUT) ? WAIT_TIMEOUT : GetLastError();
+    if (out_rc != nullptr) {
+      *out_rc = result;
+    }
+    if (out_error != nullptr) {
+      *out_error = gle;
+    }
+    UpdateLastOperation(0, result, gle);
+    LogMessage(
+        kLogError,
+        "map pin dispatch wait failed wait_rc=%lu gle=%lu result=%ld",
+        static_cast<unsigned long>(wait_rc),
+        static_cast<unsigned long>(gle),
+        result);
+    return FALSE;
+  }
+
+  if (out_rc != nullptr) {
+    *out_rc = result;
+  }
+  if (out_error != nullptr) {
+    *out_error = last_error;
+  }
+  return last_error == ERROR_SUCCESS && result != 0;
+}
+
 BOOL TriggerMoveToLocation(
     float x,
     float y,
@@ -4714,6 +5050,48 @@ BOOL HandlePipeClient(HANDLE pipe) {
         break;
       }
 
+      case kOpMapPin: {
+        MapPinResponse response = {};
+        if (header.size < sizeof(MapPinRequestHeader)) {
+          response.last_error = ERROR_INVALID_DATA;
+          UpdateLastOperation(0, 0, ERROR_INVALID_DATA);
+        } else {
+          MapPinRequestHeader request = {};
+          memcpy(&request, payload, sizeof(request));
+          const DWORD expected_size = static_cast<DWORD>(
+              sizeof(MapPinRequestHeader) + (request.text_length > 0 ? request.text_length : 0));
+          if (request.text_length <= 0 ||
+              request.text_length >= kMapPinTextCapacity ||
+              header.size != expected_size) {
+            response.last_error = ERROR_INVALID_DATA;
+            UpdateLastOperation(0, 0, ERROR_INVALID_DATA);
+          } else {
+            char text[kMapPinTextCapacity] = {};
+            memcpy(text, payload + sizeof(MapPinRequestHeader), static_cast<size_t>(request.text_length));
+            text[request.text_length] = '\0';
+            LONG rc = 0;
+            DWORD last_error = ERROR_SUCCESS;
+            response.success = TriggerAddMapPin(request.x, request.y, text, &rc, &last_error) ? 1 : 0;
+            response.rc = rc;
+            response.last_error = static_cast<int32_t>(last_error);
+            LogMessage(
+                response.success ? kLogInfo : kLogError,
+                "map pin request x=%.3f y=%.3f success=%ld rc=%ld err=%ld text=%s",
+                static_cast<double>(request.x),
+                static_cast<double>(request.y),
+                response.success,
+                response.rc,
+                response.last_error,
+                text);
+          }
+        }
+
+        if (!WriteResponse(pipe, kOpMapPin, &response, sizeof(response))) {
+          return FALSE;
+        }
+        break;
+      }
+
       case kOpChatPoll: {
         ChatPollRequest request = {};
         if (header.size == sizeof(ChatPollRequest)) {
@@ -5181,8 +5559,40 @@ SIMKEYS_API DWORD WINAPI InitSimKeys(LPVOID) {
     return 0;
   }
 
+  g_state.pending_map_pin.event = CreateEventA(nullptr, FALSE, FALSE, nullptr);
+  if (g_state.pending_map_pin.event == nullptr) {
+    CloseHandle(g_state.pending_combat_mode.event);
+    g_state.pending_combat_mode.event = nullptr;
+    CloseHandle(g_state.pending_walk_bypass.event);
+    g_state.pending_walk_bypass.event = nullptr;
+    CloseHandle(g_state.pending_move.event);
+    g_state.pending_move.event = nullptr;
+    CloseHandle(g_state.pending_identity.event);
+    g_state.pending_identity.event = nullptr;
+    CloseHandle(g_state.pending_chat.event);
+    g_state.pending_chat.event = nullptr;
+    CloseHandle(g_state.pending.event);
+    g_state.pending.event = nullptr;
+    if (g_state.log_file != nullptr) {
+      CloseHandle(g_state.log_file);
+      g_state.log_file = nullptr;
+    }
+    g_state.overlay_lock_ready = false;
+    DeleteCriticalSection(&g_state.overlay_lock);
+    g_state.log_lock_ready = false;
+    DeleteCriticalSection(&g_state.log_lock);
+    g_state.chat_lock_ready = false;
+    DeleteCriticalSection(&g_state.chat_lock);
+    g_state.lock_ready = false;
+    DeleteCriticalSection(&g_state.lock);
+    g_state.initialized = 0;
+    return 0;
+  }
+
   g_state.pipe_ready_event = CreateEventA(nullptr, TRUE, FALSE, nullptr);
   if (g_state.pipe_ready_event == nullptr) {
+    CloseHandle(g_state.pending_map_pin.event);
+    g_state.pending_map_pin.event = nullptr;
     CloseHandle(g_state.pending_combat_mode.event);
     g_state.pending_combat_mode.event = nullptr;
     CloseHandle(g_state.pending_walk_bypass.event);
@@ -5216,6 +5626,8 @@ SIMKEYS_API DWORD WINAPI InitSimKeys(LPVOID) {
   if (g_state.pipe_thread == nullptr) {
     CloseHandle(g_state.pipe_ready_event);
     g_state.pipe_ready_event = nullptr;
+    CloseHandle(g_state.pending_map_pin.event);
+    g_state.pending_map_pin.event = nullptr;
     CloseHandle(g_state.pending_combat_mode.event);
     g_state.pending_combat_mode.event = nullptr;
     CloseHandle(g_state.pending_walk_bypass.event);

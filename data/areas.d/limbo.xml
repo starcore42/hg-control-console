@@ -1,0 +1,136 @@
+<?xml version="1.0" encoding="utf-8"?>
+<runs>
+    <area name="Limbo - Ruined City of Shra'kt'lor" run="*" />
+    <area name="Limbo - Ruined City of Shra'kt'lor: Housing District" run="Limbo P1">
+		<pin x="13.49" y="54.74" text="1" />
+		<pin x="106.86" y="77.92" text="2" />
+		<pin x="64.96" y="102.14" text="3" />
+		<pin x="42.98" y="17.30" text="4" />
+		<pin x="99.42" y="86.06" text="5" />
+		<pin x="27.00" y="111.38" text="6" />
+		<pin x="71.88" y="12.36" text="7" />
+		<pin x="44.56" y="85.79" text="8" />
+		<pin x="9.17" y="115.16" text="9" />
+		<pin x="105.75" y="54.44" text="10" />
+		<pin x="44.11" y="117.11" text="11" />
+		<pin x="74.71" y="100.57" text="12" />
+		<pin x="71.09" y="15.56" text="13" />
+	</area>
+    <area name="Limbo - Ruined City of Shra'kt'lor: Merchant District" run="Limbo P1">
+		<pin x="79.38" y="94.68" text="1" />
+		<pin x="85.45" y="61.68" text="2" />
+		<pin x="98.00" y="54.01" text="3" />
+		<pin x="101.94" y="32.41" text="4" />
+		<pin x="21.83" y="17.22" text="5" />
+		<pin x="63.72" y="105.87" text="6" />
+		<pin x="59.63" y="85.12" text="7" />
+		<pin x="6.03" y="31.86" text="8" />
+		<pin x="39.78" y="24.48" text="9" />
+		<pin x="98.07" y="27.08" text="10" />
+		<pin x="40.34" y="24.65" text="11" />
+		<pin x="5.82" y="31.90" text="12" />
+	</area>
+    <area name="Limbo - Monastery of Zerth'Ad'lun: Exterior" run="Limbo P1">
+		<pin x="90.13" y="124.47" text="1" />
+		<pin x="68.86" y="13.41" text="2" />
+		<pin x="43.91" y="84.62" text="3" />
+		<pin x="101.97" y="56.07" text="4" />
+		<pin x="118.48" y="95.96" text="5" />
+		<pin x="113.19" y="30.71" text="6" />
+		<pin x="94.49" y="22.70" text="7" />
+		<pin x="66.44" y="96.42" text="8" />
+		<pin x="35.38" y="111.44" text="9" />
+		<pin x="8.31" y="97.39" text="10" />
+	</area>
+    <area name="Limbo - Monastery of Zerth'Ad'lun: Interior" run="Limbo P1">
+		<pin x="47.35" y="8.96" text="1" />
+		<pin x="111.34" y="82.16" text="2" />
+		<pin x="100.85" y="11.35" text="3" />
+		<pin x="108.23" y="70.30" text="4" />
+		<pin x="24.20" y="23.97" text="5" />
+		<pin x="93.98" y="34.04" text="6" />
+		<pin x="19.34" y="63.90" text="7" />
+		<pin x="31.87" y="77.96" text="8" />
+		<pin x="66.53" y="50.32" text="9" />
+		<pin x="56.21" y="71.19" text="10" />
+	</area>
+    <area name="Limbo - The Path of Chaos: Hemera" run="Limbo P2">
+		<pin x="35.02" y="100.63" text="1" />
+		<pin x="19.07" y="100.64" text="2" />
+		<pin x="54.37" y="80.77" text="3" />
+		<pin x="10.06" y="175.14" text="4" />
+		<pin x="25.75" y="73.30" text="5" />
+		<pin x="33.64" y="162.29" text="6" />
+		<pin x="18.84" y="143.23" text="7" />
+		<pin x="26.91" y="115.16" text="8" />
+		<pin x="44.08" y="62.31" text="9" />
+		<pin x="5.49" y="50.10" text="10" />
+	</area>
+    <area name="Limbo - The Path of Chaos: Ourea" run="Limbo P2">
+		<pin x="45.31" y="141.06" text="1" />
+		<pin x="5.84" y="73.75" text="2" />
+		<pin x="42.67" y="177.58" text="3" />
+		<pin x="54.48" y="176.07" text="4" />
+		<pin x="27.81" y="83.71" text="5" />
+		<pin x="40.07" y="26.11" text="6" />
+		<pin x="23.52" y="164.79" text="7" />
+		<pin x="10.97" y="64.76" text="8" />
+		<pin x="35.13" y="55.36" text="9" />
+		<pin x="54.91" y="140.44" text="10" />
+		<pin x="45.23" y="114.03" text="11" />
+		<pin x="13.28" y="155.83" text="12" />
+	</area>
+    <area name="Limbo - The Path of Chaos: Erebos" run="Limbo P2">
+		<pin x="34.70" y="107.49" text="1" />
+		<pin x="26.49" y="65.34" text="2" />
+		<pin x="17.89" y="147.06" text="3" />
+		<pin x="38.11" y="83.15" text="4" />
+		<pin x="26.28" y="65.15" text="5" />
+		<pin x="35.22" y="176.75" text="6" />
+		<pin x="35.05" y="107.18" text="7" />
+		<pin x="57.13" y="173.72" text="8" />
+		<pin x="21.56" y="165.75" text="9" />
+		<pin x="32.42" y="25.84" text="10" />
+		<pin x="25.67" y="112.60" text="11" />
+		<pin x="11.55" y="62.59" text="12" />
+	</area>
+    <area name="Limbo - The Spawning Stone" run="Limbo P2">
+		<pin x="73.22" y="22.81" text="1" />
+		<pin x="73.01" y="62.18" text="2" />
+		<pin x="24.00" y="102.64" text="3" />
+		<pin x="114.46" y="46.19" text="4" />
+		<pin x="17.09" y="67.56" text="5" />
+		<pin x="84.85" y="82.51" text="6" />
+		<pin x="83.38" y="104.10" text="7" />
+		<pin x="55.88" y="32.78" text="8" />
+		<pin x="114.52" y="34.66" text="9" />
+		<pin x="22.85" y="31.07" text="10" />
+		<pin x="112.62" y="77.66" text="11" />
+		<pin x="12.40" y="55.56" text="12" />
+		<pin x="77.27" y="27.32" text="13" />
+	</area>
+    <area name="Limbo - Fortress of Entropy: Outer Ward" run="Limbo P2">
+		<pin x="31.54" y="76.43" text="1" />
+		<pin x="71.89" y="27.47" text="2" />
+		<pin x="23.43" y="74.34" text="3" />
+		<pin x="18.89" y="59.51" text="4" />
+		<pin x="177.66" y="12.81" text="5" />
+		<pin x="145.30" y="11.72" text="6" />
+		<pin x="108.73" y="25.67" text="7" />
+		<pin x="54.50" y="32.77" text="8" />
+		<pin x="113.73" y="35.21" text="9" />
+	</area>
+    <area name="Limbo - Fortress of Entropy: Inner Ward" run="Limbo P2">
+		<pin x="136.27" y="95.33" text="1" />
+		<pin x="137.78" y="59.12" text="2" />
+		<pin x="114.39" y="83.58" text="3" />
+		<pin x="167.38" y="52.85" text="4" />
+		<pin x="103.84" y="90.68" text="5" />
+		<pin x="117.62" y="96.71" text="6" />
+		<pin x="19.30" y="58.89" text="7" />
+		<pin x="145.20" y="48.66" text="8" />
+		<pin x="154.79" y="75.32" text="9" />
+		<pin x="61.98" y="117.45" text="10" />
+	</area>
+</runs>
+

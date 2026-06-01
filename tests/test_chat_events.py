@@ -1,5 +1,6 @@
 import os
 import time
+import tempfile
 import unittest
 
 from src.simkeys_app import simkeys_hgx_combat as combat
@@ -16,8 +17,10 @@ from src.simkeys_app.simkeys_script_host import (
     ClientScriptBase,
     ClientScriptHost,
     InGameTimersScript,
+    MapPinsScript,
     WeaponDamageEstimate,
     WeaponRecommendation,
+    _load_hgx_area_map_pins,
     _default_status_rules_dir,
     _load_hgx_spell_timer_specs,
     _load_status_timer_rules,
@@ -42,6 +45,7 @@ class FakeHost:
         self.overlays = []
         self.slots = []
         self.moves = []
+        self.map_pins = []
         self.move_bypass_flags = []
         self.walk_bypass_calls = []
         self.walk_bypass_enabled = False
@@ -99,6 +103,10 @@ class FakeHost:
         self.moves.append((float(x), float(y), float(z)))
         self.move_bypass_flags.append(bool(bypass_no_walk))
         self.position = (float(x), float(y), float(z))
+        return {"success": 1, "rc": 1, "err": 0}
+
+    def add_map_pin(self, x, y, text):
+        self.map_pins.append((float(x), float(y), str(text)))
         return {"success": 1, "rc": 1, "err": 0}
 
     def set_walk_bypass(self, enabled):
@@ -732,6 +740,52 @@ class ChatEventTests(unittest.TestCase):
         self.assertTrue(follow.wants_chat_event(area_event))
         self.assertTrue(follow.wants_chat_event(attack_event))
         self.assertFalse(follow.wants_chat_event(chatter_event))
+
+    def test_map_pins_loads_hgx_area_xml(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, "areas.xml"), "w", encoding="utf-8") as fp:
+                fp.write(
+                    """<?xml version=\"1.0\" encoding=\"utf-8\"?>
+<runs>
+  <area name=\"Test Area\" run=\"Run A\">
+    <pin x=\"13.49\" y=\"54.74\" text=\"1\" />
+    <pin x=\"106.86\" y=\"77.92\" text=\"Boss\" />
+  </area>
+</runs>
+"""
+                )
+
+            areas = _load_hgx_area_map_pins(tmp)
+
+        self.assertEqual(len(areas), 1)
+        self.assertEqual(areas[0].name, "Test Area")
+        self.assertEqual([(pin.x, pin.y, pin.text) for pin in areas[0].pins], [(13.49, 54.74, "1"), (106.86, 77.92, "Boss")])
+
+    def test_map_pins_adds_pins_on_area_transition(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, "areas.xml"), "w", encoding="utf-8") as fp:
+                fp.write(
+                    """<runs>
+  <area name=\"Limbo - Test\" run=\"Limbo P1\">
+    <pin x=\"1\" y=\"2\" text=\"A\" />
+    <pin x=\"3.5\" y=\"4.25\" text=\"B\" />
+  </area>
+</runs>
+"""
+                )
+            host = FakeHost()
+            script = MapPinsScript(
+                host.client,
+                {"areas_dir": tmp, "include_backlog": True},
+                host,
+            )
+            script.on_start()
+
+            script.on_chat_event(parse_chat_line_event(1, "You are now in Limbo - Test."))
+            script.on_chat_event(parse_chat_line_event(2, "You are now in Limbo - Test."))
+
+        self.assertEqual(host.map_pins, [(1.0, 2.0, "A"), (3.5, 4.25, "B")])
+        self.assertIn("2 pins", script.status_text)
 
     def test_coordinate_follow_spam_moves_to_published_lead_position(self):
         lead_host = FakeHost()

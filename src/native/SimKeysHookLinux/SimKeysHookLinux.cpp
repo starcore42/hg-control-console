@@ -89,6 +89,7 @@ constexpr uint32_t kOpOverlayClearAll = 3011;
 constexpr uint32_t kOpMoveToLocation = 3012;
 constexpr uint32_t kOpSetWalkBypass = 3013;
 constexpr uint32_t kOpSetActionMode = 3014;
+constexpr uint32_t kOpMapPin = 3015;
 
 constexpr uint32_t kImageBase = 0x08048000u;
 constexpr uint32_t kAppGlobalSlotAddress = 0x0862C354u;
@@ -110,6 +111,7 @@ constexpr uint32_t kSetActionMode = 0x08315B2Cu;
 constexpr uint32_t kGetActionMode = 0x08305538u;
 constexpr uint32_t kToggleModeInput = 0x081365CCu;
 constexpr uint32_t kPlayerNameBuilder = 0x08138B68u;
+constexpr uint32_t kNwnStringConstructFromCString = 0x085A6070u;
 constexpr uint32_t kNwnStringDestroy = 0x085A61DCu;
 constexpr uint32_t kCurrentPlayerGlobalAddress = 0x0862EF18u;
 
@@ -143,6 +145,8 @@ constexpr int kLogDebug = 2;
 constexpr int kPipeBufferSize = 65536;
 constexpr int kDispatchTimeoutMs = 2000;
 constexpr int kPendingChatCapacity = 1024;
+constexpr int kMapPinTextCapacity = 512;
+constexpr int kMapPinXmlCapacity = 1024;
 constexpr int kChatQueueCapacity = 1024;
 constexpr int kChatTextCapacity = 768;
 constexpr int kCharacterNameCapacity = 128;
@@ -252,6 +256,18 @@ struct TriggerResponse {
 struct ChatSendResponse {
   int32_t success;
   int32_t mode;
+  int32_t rc;
+  int32_t last_error;
+};
+
+struct MapPinRequestHeader {
+  float x;
+  float y;
+  int32_t text_length;
+};
+
+struct MapPinResponse {
+  int32_t success;
   int32_t rc;
   int32_t last_error;
 };
@@ -370,6 +386,7 @@ enum PendingKind {
   kPendingMove,
   kPendingWalkBypass,
   kPendingActionMode,
+  kPendingMapPin,
   kPendingRefreshIdentity,
 };
 
@@ -390,6 +407,7 @@ struct PendingCommand {
   char text[kPendingChatCapacity];
   TriggerResponse trigger_response;
   ChatSendResponse chat_response;
+  MapPinResponse map_pin_response;
   MoveToLocationResponse move_response;
   WalkBypassResponse walk_response;
   SetActionModeResponse action_response;
@@ -2090,6 +2108,163 @@ int32_t CallChatSendDirect(const char* text, int32_t mode) {
   AtomicSet(&g_state.last_chat_mode, mode);
   AtomicSet(&g_state.last_chat_result, 1);
   AtomicSet(&g_state.last_chat_error, 0);
+  return 1;
+}
+
+bool AppendMapPinXmlText(char* out, size_t capacity, size_t* offset, const char* text) {
+  if (out == nullptr || offset == nullptr || *offset >= capacity) {
+    return false;
+  }
+  const unsigned char* cursor = reinterpret_cast<const unsigned char*>(text != nullptr ? text : "");
+  while (*cursor != '\0') {
+    const char* replacement = nullptr;
+    char single[2] = {static_cast<char>(*cursor), '\0'};
+    switch (*cursor) {
+      case '&':
+        replacement = "&amp;";
+        break;
+      case '<':
+        replacement = "&lt;";
+        break;
+      case '>':
+        replacement = "&gt;";
+        break;
+      case '"':
+        replacement = "&quot;";
+        break;
+      default:
+        if (*cursor < 0x20u && *cursor != '\t') {
+          replacement = "?";
+        } else {
+          replacement = single;
+        }
+        break;
+    }
+    const size_t length = strlen(replacement);
+    if (*offset + length >= capacity) {
+      return false;
+    }
+    memcpy(out + *offset, replacement, length);
+    *offset += length;
+    ++cursor;
+  }
+  out[*offset] = '\0';
+  return true;
+}
+
+bool AppendMapPinXmlLiteral(char* out, size_t capacity, size_t* offset, const char* text) {
+  if (out == nullptr || offset == nullptr || text == nullptr) {
+    return false;
+  }
+  const size_t length = strlen(text);
+  if (*offset + length >= capacity) {
+    return false;
+  }
+  memcpy(out + *offset, text, length);
+  *offset += length;
+  out[*offset] = '\0';
+  return true;
+}
+
+bool BuildMapPinXml(float x, float y, const char* text, char* out, size_t capacity) {
+  if (out == nullptr || capacity == 0 || text == nullptr || text[0] == '\0' ||
+      !IsPlausibleCoordinate(x) || !IsPlausibleCoordinate(y)) {
+    errno = EINVAL;
+    return false;
+  }
+  const int written = snprintf(
+      out,
+      capacity,
+      "<pin x=\"%.6f\" y=\"%.6f\" text=\"",
+      static_cast<double>(x),
+      static_cast<double>(y));
+  if (written <= 0 || static_cast<size_t>(written) >= capacity) {
+    errno = ENAMETOOLONG;
+    return false;
+  }
+  size_t offset = static_cast<size_t>(written);
+  if (!AppendMapPinXmlText(out, capacity, &offset, text) ||
+      !AppendMapPinXmlLiteral(out, capacity, &offset, "\" />")) {
+    errno = ENAMETOOLONG;
+    return false;
+  }
+  return true;
+}
+
+int32_t CallAddMapPinDirect(float x, float y, const char* text) {
+  struct NwnStringRef {
+    char* text;
+    int32_t length;
+  };
+  struct ClientMessageExtra {
+    uint32_t word0;
+    uint32_t word1;
+    uint32_t word2;
+    uint32_t word3;
+  };
+
+  char xml[kMapPinXmlCapacity] = {};
+  if (!BuildMapPinXml(x, y, text, xml, sizeof(xml))) {
+    return 0;
+  }
+
+  const uint32_t gui = ReadCurrentGuiPointer();
+  if (gui == 0) {
+    errno = ENOENT;
+    return 0;
+  }
+
+  typedef NwnStringRef* (*ConstructStringFn)(NwnStringRef*, const char*);
+  typedef void (*ClientMessageDispatchFn)(
+      void* gui,
+      NwnStringRef* message,
+      int32_t opcode,
+      int32_t arg0,
+      int32_t arg1,
+      ClientMessageExtra extra);
+
+  NwnStringRef message = {};
+  ClientMessageExtra extra = {};
+  int signal_number = 0;
+  if (!RunWithFaultGuard(
+          [&]() {
+            NwnFunction<ConstructStringFn>(kNwnStringConstructFromCString)(&message, xml);
+          },
+          &signal_number)) {
+    errno = EFAULT;
+    LogMessage(kLogError, "map pin string construction faulted signal=%d text=%s", signal_number, text);
+    return 0;
+  }
+  if (message.text == nullptr) {
+    errno = ENOMEM;
+    return 0;
+  }
+
+  signal_number = 0;
+  if (!RunWithFaultGuard(
+          [&]() {
+            NwnFunction<ClientMessageDispatchFn>(kChatWindowLog)(
+                reinterpret_cast<void*>(gui),
+                &message,
+                0x80,
+                0,
+                0,
+                extra);
+          },
+          &signal_number)) {
+    errno = EFAULT;
+    LogMessage(
+        kLogError,
+        "map pin dispatch faulted signal=%d gui=0x%08X x=%.3f y=%.3f text=%s",
+        signal_number,
+        gui,
+        static_cast<double>(x),
+        static_cast<double>(y),
+        text);
+    return 0;
+  }
+
+  LogMessage(kLogInfo, "map pin dispatched x=%.3f y=%.3f text=%s", static_cast<double>(x), static_cast<double>(y), text);
   return 1;
 }
 
@@ -3942,6 +4117,14 @@ void DrainPendingOnMainThread() {
       pending->action_response.last_error = error;
       break;
     }
+    case kPendingMapPin: {
+      pending->map_pin_response.rc = CallAddMapPinDirect(pending->x, pending->y, pending->text);
+      pending->map_pin_response.success = pending->map_pin_response.rc ? 1 : 0;
+      pending->map_pin_response.last_error = pending->map_pin_response.success ? 0 : errno;
+      AtomicSet(&g_state.last_result, pending->map_pin_response.rc);
+      AtomicSet(&g_state.last_error, pending->map_pin_response.last_error);
+      break;
+    }
     case kPendingRefreshIdentity: {
       int32_t error = 0;
       RefreshCharacterIdentity(&error);
@@ -4137,6 +4320,35 @@ bool HandleClient(int fd) {
           }
         }
         WriteResponse(fd, kOpSetActionMode, &response, sizeof(response));
+        break;
+      }
+      case kOpMapPin: {
+        MapPinResponse response = {};
+        if (header.size < sizeof(MapPinRequestHeader)) {
+          response.last_error = kErrInvalidData;
+        } else {
+          MapPinRequestHeader request = {};
+          memcpy(&request, payload, sizeof(request));
+          const uint32_t expected_size = static_cast<uint32_t>(
+              sizeof(MapPinRequestHeader) + (request.text_length > 0 ? request.text_length : 0));
+          if (request.text_length <= 0 ||
+              request.text_length >= kMapPinTextCapacity ||
+              header.size != expected_size) {
+            response.last_error = kErrInvalidData;
+          } else {
+            PendingCommand pending = {};
+            pending.x = request.x;
+            pending.y = request.y;
+            memcpy(pending.text, payload + sizeof(MapPinRequestHeader), request.text_length);
+            pending.text[request.text_length] = '\0';
+            if (SubmitPending(kPendingMapPin, &pending)) {
+              response = pending.map_pin_response;
+            } else {
+              response.last_error = kErrTimeout;
+            }
+          }
+        }
+        WriteResponse(fd, kOpMapPin, &response, sizeof(response));
         break;
       }
       case kOpChatPoll: {

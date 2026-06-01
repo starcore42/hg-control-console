@@ -722,6 +722,14 @@ def set_combat_mode(record_or_pid, mode: int, enabled: bool = True):
     return set_action_mode(record_or_pid, mode, enabled)
 
 
+def add_map_pin(record_or_pid, x: float, y: float, text: str):
+    pipe = open_pipe(record_or_pid)
+    try:
+        return simkeys.add_map_pin(pipe, x, y, text)
+    finally:
+        pipe.close()
+
+
 def show_overlay_text(
     record_or_pid,
     text: str,

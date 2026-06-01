@@ -220,7 +220,7 @@ class UnixSocketPipe:
 
 Pipe = WindowsPipe if IS_WINDOWS else UnixSocketPipe
 
-OP_QUERY=3000; OP_SLOT=3001; OP_VK=3002; OP_SETLOG=3003; OP_REPLAY=3004; OP_SNAPSHOT=3005; OP_CHAT_SEND=3006; OP_CHAT_POLL=3007; OP_SLOT_PAGE=3008; OP_OVERLAY_TEXT=3009; OP_OVERLAY_CLEAR=3010; OP_OVERLAY_CLEAR_ALL=3011; OP_MOVE_TO_LOCATION=3012; OP_SET_WALK_BYPASS=3013; OP_SET_ACTION_MODE=3014
+OP_QUERY=3000; OP_SLOT=3001; OP_VK=3002; OP_SETLOG=3003; OP_REPLAY=3004; OP_SNAPSHOT=3005; OP_CHAT_SEND=3006; OP_CHAT_POLL=3007; OP_SLOT_PAGE=3008; OP_OVERLAY_TEXT=3009; OP_OVERLAY_CLEAR=3010; OP_OVERLAY_CLEAR_ALL=3011; OP_MOVE_TO_LOCATION=3012; OP_SET_WALK_BYPASS=3013; OP_SET_ACTION_MODE=3014; OP_MAP_PIN=3015
 QUERY_STRUCT_LEGACY = struct.Struct("<" + ("I" * 24) + ("i" * 10) + "I" + ("i" * 2) + ("I" * 4) + f"{CHAR_NAME_CAPACITY}s")
 QUERY_STRUCT = struct.Struct("<" + ("I" * 24) + ("i" * 10) + "I" + ("i" * 2) + ("I" * 4) + "ifff" + f"{CHAR_NAME_CAPACITY}s")
 QUERY_STRUCT_WITH_CREATURE = struct.Struct("<" + ("I" * 24) + ("i" * 10) + ("I" * 2) + ("i" * 2) + ("I" * 4) + "ifff" + f"{CHAR_NAME_CAPACITY}s")
@@ -232,6 +232,8 @@ MOVE_TO_LOCATION_RESPONSE = struct.Struct("<iiifff")
 WALK_BYPASS_RESPONSE = struct.Struct("<iii")
 SET_ACTION_MODE_REQUEST = struct.Struct("<ii")
 SET_ACTION_MODE_RESPONSE = struct.Struct("<iiiiii")
+MAP_PIN_REQUEST_HEADER = struct.Struct("<ffi")
+MAP_PIN_RESPONSE = struct.Struct("<iii")
 OVERLAY_POSITIONS = {
     "ABSOLUTE": 0,
     "A": 0,
@@ -508,6 +510,19 @@ def set_action_mode(p, mode, enabled=True):
 def set_combat_mode(p, mode, enabled=True):
     return set_action_mode(p, mode, enabled)
 
+def add_map_pin(p, x, y, text):
+    payload = encode_nwn_text(text)
+    if len(payload) >= 512:
+        payload = payload[:511]
+    request = MAP_PIN_REQUEST_HEADER.pack(float(x), float(y), len(payload)) + payload
+    _, data = p.xfer(OP_MAP_PIN, request)
+    success, rc, err = MAP_PIN_RESPONSE.unpack(data)
+    return {
+        "success": success,
+        "rc": rc,
+        "err": err,
+    }
+
 def chat_poll(p, after=0, max_lines=20):
     _, data = p.xfer(OP_CHAT_POLL, struct.pack("ii", after, max_lines))
     if len(data) < 8:
@@ -611,6 +626,10 @@ def cmd_set_action_mode(p, mode, enabled):
 def cmd_set_combat_mode(p, mode, enabled):
     cmd_set_action_mode(p, mode, enabled)
 
+def cmd_map_pin(p, x, y, text):
+    result = add_map_pin(p, x, y, text)
+    print(f"map-pin: success={result['success']} rc={result['rc']} err={result['err']}")
+
 def cmd_chat_poll(p, after, max_lines):
     result = chat_poll(p, after, max_lines)
     print(f"chat-poll: latest_seq={result['latest_seq']} count={len(result['lines'])}")
@@ -658,6 +677,7 @@ if __name__ == "__main__":
     s10 = sub.add_parser("set-walk-bypass"); s10.add_argument("enabled", type=int, choices=[0, 1])
     s11 = sub.add_parser("set-action-mode"); s11.add_argument("mode", type=int, choices=range(0, 13)); s11.add_argument("--off", action="store_true")
     s12 = sub.add_parser("set-combat-mode"); s12.add_argument("mode", type=int, choices=range(0, 13)); s12.add_argument("--off", action="store_true")
+    s13 = sub.add_parser("map-pin"); s13.add_argument("x", type=float); s13.add_argument("y", type=float); s13.add_argument("text")
     a = ap.parse_args()
 
     p = Pipe(a.pid)
@@ -678,5 +698,6 @@ if __name__ == "__main__":
         elif a.cmd == "set-walk-bypass": cmd_set_walk_bypass(p, a.enabled)
         elif a.cmd == "set-action-mode": cmd_set_action_mode(p, a.mode, not a.off)
         elif a.cmd == "set-combat-mode": cmd_set_combat_mode(p, a.mode, not a.off)
+        elif a.cmd == "map-pin": cmd_map_pin(p, a.x, a.y, a.text)
     finally:
         p.close()

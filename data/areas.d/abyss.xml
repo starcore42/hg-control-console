@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="utf-8"?>
+<runs>
+	<area name="Pazunia - Aldinach's Egg" run="*" />
+	<area name="Pazunia - Lakes of Molten Iron" run="*" />
+	<area name="Pazunia - River Styx" run="*" />
+	<area name="Pazunia - The Grand Abyss" run="*" />
+
+	<area name="Azzagrat - Zrintor Copse" run="Azzagrat 1" />
+	<area name="Azzagrat - Zrintor Grove" run="Azzagrat 1">
+	<pin x="71.51" y="17.98" text="Search spot" />
+	</area>
+	<area name="Azzagrat - Zrintor Marsh" run="*">
+	<pin x="52.12" y="58.60" text="Search spot" />
+	</area>
+	<area name="Azzagrat - Salt Swamp Fen" run="Azzagrat 2" />
+	<area name="Azzagrat - Salt Swamp Village" run="Azzagrat 2" />
+	<area name="Azzagrat - Salt Swamp Moor" run="Azzagrat 2" />
+	<area name="Azzagrat - Argent Palace Hall of Mirrors" run="*">
+	<pin x="62.17" y="6.20" text="Search spot" />
+	</area>
+	<area name="Azzagrat - Argent Palace Perfumed Gardens" run="Azzagrat 3" />
+	<area name="Azzagrat - Argent Palace Private Room" run="Azzagrat 3" />
+	<area name="Azzagrat - Argent Palace Throne Room" run="Azzagrat 3">
+	<pin x="118.17" y="14.76" text="Search spot" />
+	<pin x="42.18" y="72.00" text="Search spot" />
+	</area>
+	<area name="Gaping Maw - Screaming Jungle" run="Gaping Maw 1" />
+	<area name="Gaping Maw - Lemoriax" run="Gaping Maw 1" />
+	<area name="Gaping Maw - Temple of Demogorgon" run="*" />
+	<area name="Gaping Maw - Abysm Reef" run="Gaping Maw 2" />
+	<area name="Gaping Maw - Abysm's Base" run="Gaping Maw 2" />
+	<area name="Gaping Maw - Abysm Tower Interior, Sea-Level Lab" run="*" />
+	<area name="Gaping Maw - Abysm Ascent" run="Gaping Maw 3" />
+	<area name="Gaping Maw - Abysm Crossing" run="Gaping Maw 3" />
+	<area name="Gaping Maw - Demogorgon's Chambers" run="Gaping Maw 3" />
+
+	<area name="Shedaklah - Gasping Crater" run="Shedaklah 1" />
+	<area name="Shedaklah - Crater Rim" run="Shedaklah 1" />
+	<area name="Shedaklah - Boglands" run="Shedaklah 1" />
+	<area name="Shedaklah - River Styx" run="*" />
+	<area name="Shedaklah - Forest of Poisoned Dreams, Edge" run="Shedaklah 2" />
+	<area name="Shedaklah - Forest of Poisoned Dreams" run="Shedaklah 2" />
+	<area name="Shedaklah - Forest of Poisoned Dreams, Crossing" run="*" />
+	<area name="Shedaklah - Slime Pits" run="Shedaklah 3" />
+	<area name="Shedaklah - Amorphous Cavern" run="Shedaklah 3" />
+
+	<area name="Thanatos - Orcusgate - Gate of Fire" run="Thanatos 1" />
+	<area name="Thanatos - Orcusgate" run="Thanatos 1" />
+	<area name="Thanatos - Tundra" run="Thanatos 1" />
+	<area name="Thanatos - River Styx" run="*" />
+	<area name="Thanatos - The Final Hills" run="*" />
+	<area name="Thanatos - Valley of the Crypt Things" run="*" />
+	<area name="Thanatos - Portal Chamber" run="*" />
+	<!-- <area name="Thanatos - The Final Hills" run="*" /> can be part 2 or 3 -->
+	<area name="Thanatos - Oblivion's End" run="Thanatos 3" />
+	<area name="Thanatos - Everlost" run="Thanatos 3" />
+	<area name="Thanatos - Orcus' Hall" run="Thanatos 3" />
+
+	<area name="Zionyn - Cliffsides" run="Zionyn 1" />
+	<area name="Zionyn - Demonic Hive" run="Zionyn 1" />
+	<area name="Zionyn - Murky Seacaves" run="*" />
+	<area name="Zionyn - Ocean Trenches" run="Zionyn 2" />
+	<area name="Zionyn - Ocean Floor" run="Zionyn 2" />
+	<area name="Zionyn - Shoreline" run="Zionyn 2" />
+	<area name="Zionyn - Ekolid Tunnels" run="*" />
+	<area name="Zionyn - Maw of Obox-Ob" run="Zionyn 3" />
+	<area name="Zionyn - Lair of Obox-Ob" run="Zionyn 3" />
+</runs>

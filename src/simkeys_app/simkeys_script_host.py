@@ -175,6 +175,10 @@ def _default_follow_cues_dir() -> str:
     return os.path.join(_repo_root(), "data", "followcues.d")
 
 
+def _default_areas_dir() -> str:
+    return os.path.join(_repo_root(), "data", "areas.d")
+
+
 def _parse_duration_seconds(value) -> float:
     text = str(value or "").strip()
     if not text:
@@ -246,6 +250,7 @@ OVERLAY_SCRIPT_CONTROLS: Tuple[Tuple[str, str], ...] = (
     ("auto_action", "Ac"),
     ("auto_attack", "At"),
     ("coordinate_follow", "Cf"),
+    ("map_pins", "Pn"),
     ("always_on", "BF"),
     ("auto_rsm", "Md"),
     ("ingame_timers", "Tm"),
@@ -405,6 +410,21 @@ class SpellTimerSpec:
     color_rgb: int
     source: str
     trigger_pattern: str = ""
+
+
+@dataclass(frozen=True)
+class AreaMapPin:
+    x: float
+    y: float
+    text: str
+
+
+@dataclass(frozen=True)
+class AreaMapPinSet:
+    name: str
+    run: str
+    pins: Tuple[AreaMapPin, ...]
+    source: str
 
 
 @dataclass
@@ -621,6 +641,63 @@ def parse_chat_line_event(sequence: int, text: str, password_prompt_text: str = 
         overlay_script_id=overlay_script_id,
         password_prompt=password_prompt,
     )
+
+
+def _area_pin_key(name: str) -> str:
+    return re.sub(r"\s+", " ", str(name or "").strip()).casefold()
+
+
+def _load_hgx_area_map_pins(source_dir: str) -> Tuple[AreaMapPinSet, ...]:
+    directory = os.path.abspath(os.path.expanduser(os.path.expandvars(str(source_dir or ""))))
+    if not os.path.isdir(directory):
+        return ()
+
+    by_area: Dict[str, AreaMapPinSet] = {}
+    for file_name in sorted(os.listdir(directory)):
+        if not file_name.lower().endswith(".xml"):
+            continue
+        path = os.path.join(directory, file_name)
+        try:
+            root = ET.parse(path).getroot()
+        except Exception:
+            continue
+
+        for element in root.findall("area"):
+            name = re.sub(r"\s+", " ", str(element.get("name") or "").strip())
+            if not name:
+                continue
+            pins: List[AreaMapPin] = []
+            for pin in element.findall("pin"):
+                text = str(pin.get("text") or "").strip()
+                if not text:
+                    continue
+                try:
+                    x = float(pin.get("x"))
+                    y = float(pin.get("y"))
+                except (TypeError, ValueError):
+                    continue
+                pins.append(AreaMapPin(x=x, y=y, text=text))
+            if not pins:
+                continue
+
+            key = _area_pin_key(name)
+            current = by_area.get(key)
+            if current is None:
+                by_area[key] = AreaMapPinSet(
+                    name=name,
+                    run=str(element.get("run") or "").strip(),
+                    pins=tuple(pins),
+                    source=file_name,
+                )
+            else:
+                by_area[key] = AreaMapPinSet(
+                    name=current.name,
+                    run=current.run,
+                    pins=current.pins + tuple(pins),
+                    source=f"{current.source},{file_name}",
+                )
+
+    return tuple(sorted(by_area.values(), key=lambda area: area.name.casefold()))
 
 
 def _load_hgx_spell_timer_specs(source_dir: str) -> Tuple[SpellTimerSpec, ...]:
@@ -7052,6 +7129,159 @@ class CoordinateFollowScript(ClientScriptBase):
         return details
 
 
+class MapPinsScript(ClientScriptBase):
+    script_id = "map_pins"
+    script_label = "Map Pins"
+    AREA_TRANSITION_RE = AREA_TRANSITION_LINE_RE
+
+    def __init__(self, client, config: Dict[str, object], host):
+        super().__init__(client, config, host)
+        self.enabled = False
+        self.area_pins: Dict[str, AreaMapPinSet] = {}
+        self.area_count = 0
+        self.pin_count = 0
+        self.last_area_name = ""
+        self.last_area_key = ""
+        self.last_pin_count = 0
+        self.added_count = 0
+        self.failed_count = 0
+        self.last_error_key = ""
+        self.load_error = ""
+
+    def on_start(self):
+        super().on_start()
+        self.enabled = True
+        self.last_area_name = ""
+        self.last_area_key = ""
+        self.last_pin_count = 0
+        self.added_count = 0
+        self.failed_count = 0
+        self.last_error_key = ""
+        self.load_error = ""
+        self._load_area_pins()
+        if self.area_count:
+            self.set_status(f"Loaded {self.area_count} areas")
+        else:
+            self.set_status("No map pin data")
+
+    def on_stop(self):
+        self.enabled = False
+        super().on_stop()
+
+    def needs_chat_feed(self) -> bool:
+        return True
+
+    def chat_event_types(self) -> Tuple[str, ...]:
+        return ("area_transition",)
+
+    def on_chat_event(self, event: ChatLineEvent):
+        if not self.enabled or not self.should_process(event.sequence):
+            return
+        if not event.has_kind("area_transition"):
+            return
+        area_name = self._area_name_from_event(event)
+        if not area_name:
+            return
+        area_key = _area_pin_key(area_name)
+        if area_key == self.last_area_key and not bool(self.config.get("repeat_same_area", False)):
+            return
+        self.last_area_name = area_name
+        self.last_area_key = area_key
+        area = self.area_pins.get(area_key)
+        if area is None:
+            self.last_pin_count = 0
+            self.set_status(f"No pins: {area_name}")
+            self.host.notify_state_changed()
+            return
+        self._add_area_pins(area)
+
+    def _load_area_pins(self):
+        source_dir = str(self.config.get("areas_dir") or "").strip()
+        if not source_dir:
+            source_dir = _default_areas_dir()
+        try:
+            pin_sets = _load_hgx_area_map_pins(source_dir)
+        except Exception as exc:
+            self.load_error = f"{type(exc).__name__}: {exc}"
+            pin_sets = ()
+        self.area_pins = {_area_pin_key(area.name): area for area in pin_sets}
+        self.area_count = len(pin_sets)
+        self.pin_count = sum(len(area.pins) for area in pin_sets)
+        if self.load_error:
+            self.host.emit(
+                "error",
+                f"{self.host.client.display_name}: {self.script_label} data load failed: {self.load_error}",
+                script_id=self.script_id,
+            )
+
+    def _area_name_from_event(self, event: ChatLineEvent) -> str:
+        match = self.AREA_TRANSITION_RE.search(event.normalized)
+        if match is None:
+            match = self.AREA_TRANSITION_RE.search(event.raw_text)
+        if match is None:
+            return ""
+        return re.sub(r"\s+", " ", match.group(1)).strip(" .")
+
+    def _add_area_pins(self, area: AreaMapPinSet):
+        added = 0
+        failed = 0
+        first_error = ""
+        for pin in area.pins:
+            try:
+                result = self.host.add_map_pin(pin.x, pin.y, pin.text)
+            except Exception as exc:
+                failed += 1
+                if not first_error:
+                    first_error = f"exc:{type(exc).__name__}:{exc}"
+                continue
+            if bool(result.get("success")):
+                added += 1
+            else:
+                failed += 1
+                if not first_error:
+                    first_error = f"rc:{result.get('rc')}:{result.get('err')}"
+
+        self.last_pin_count = len(area.pins)
+        self.added_count += added
+        self.failed_count += failed
+        if failed:
+            self.set_status(f"{area.name}: {added}/{len(area.pins)} pins")
+            error_key = f"{area.name}:{first_error}:{failed}"
+            if error_key != self.last_error_key:
+                self.last_error_key = error_key
+                self.host.emit(
+                    "error",
+                    (
+                        f"{self.host.client.display_name}: {self.script_label} added {added}/{len(area.pins)} "
+                        f"pins for '{area.name}' ({first_error})"
+                    ),
+                    script_id=self.script_id,
+                )
+        else:
+            self.last_error_key = ""
+            self.set_status(f"{area.name}: {added} pins")
+            self.host.emit(
+                "info",
+                f"{self.host.client.display_name}: {self.script_label} added {added} pins for '{area.name}'",
+                script_id=self.script_id,
+            )
+        self.host.notify_state_changed()
+
+    def get_poll_interval(self) -> float:
+        return max(float(self.config.get("poll_interval", 0.20)), 0.05)
+
+    def get_state_details(self) -> dict:
+        return {
+            "areas_loaded": self.area_count,
+            "pins_loaded": self.pin_count,
+            "current_area": self.last_area_name,
+            "last_pin_count": self.last_pin_count,
+            "added_count": self.added_count,
+            "failed_count": self.failed_count,
+            "load_error": self.load_error,
+        }
+
+
 class AlwaysOnScript(AutoFollowScript):
     script_id = "always_on"
     script_label = "Basic Functions"
@@ -8823,6 +9053,9 @@ class ClientScriptHost:
     def move_to_location(self, x: float, y: float, z: float, bypass_no_walk: bool = False):
         return runtime.move_to_location(self.client, x, y, z, bypass_no_walk=bypass_no_walk)
 
+    def add_map_pin(self, x: float, y: float, text: str):
+        return runtime.add_map_pin(self.client, x, y, text)
+
     def set_walk_bypass(self, enabled: bool):
         return runtime.set_walk_bypass(self.client, enabled)
 
@@ -9402,6 +9635,25 @@ class ScriptManager:
             ),
         )
         self.registry[coordinate_follow.script_id] = coordinate_follow
+
+        map_pins = ScriptDefinition(
+            script_id="map_pins",
+            name="Map Pins",
+            description="Add HGX map pins for the current area when an area-transition line is seen.",
+            fields=[
+                ScriptField("areas_dir", "Areas", "text", "", width=36),
+                ScriptField("poll_interval", "Poll", "float", 0.20, minimum=0.05, maximum=2.0, step=0.05, width=6),
+                ScriptField("max_lines", "Batch", "int", 80, minimum=1, maximum=500, step=1, width=5),
+                ScriptField("include_backlog", "Backlog", "bool", False),
+                ScriptField("repeat_same_area", "Repeat", "bool", False),
+            ],
+            factory=MapPinsScript,
+            details=(
+                "Map Pins loads HGX area pin coordinates from `data\\areas.d` by default. When the client reports an "
+                "area transition, it adds every configured pin for that exact area name through the native HGCC hook."
+            ),
+        )
+        self.registry[map_pins.script_id] = map_pins
 
         always_on = ScriptDefinition(
             script_id="always_on",

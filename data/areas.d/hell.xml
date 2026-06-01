@@ -1,0 +1,186 @@
+<?xml version="1.0" encoding="utf-8"?>
+<runs>
+	<area name="Avernus - Foothills" run="Avernus" />
+	<area name="Avernus - Plains" run="Avernus">
+		<pin x="32.4" y="8.5" text="Search spot" />
+		<pin x="14.7" y="0.3" text="Search spot" />
+		<pin x="28.3" y="45.5" text="Search spot" />
+		<pin x="44.8" y="93.9" text="Search spot" />
+		<pin x="65.9" y="73.0" text="Search spot" />
+		<pin x="85.1" y="6.2" text="Search spot" />
+		<pin x="87.5" y="64.7" text="Search spot" />
+	</area>
+	<area name="Avernus - Pillar of Skulls" run="Avernus">
+		<pin x="8.1" y="133.6" text="Search spot" />
+		<pin x="69.5" y="132.5" text="Search spot" />
+		<pin x="93.3" y="94.0" text="Search spot" />
+		<pin x="84.2" y="63.2" text="Search spot" />
+		<pin x="21.5" y="85.3" text="Search spot" />
+		<pin x="55.6" y="11.9" text="Search spot" />
+	</area>
+	
+	<area name="Dis - Burning City of Iron" run="Dis" />
+	<area name="Dis - Iron Tower" run="Dis">
+		<pin x="43.2" y="24.8" text="Search spot" />
+		<pin x="1.1" y="5.0" text="Search spot" />
+		<pin x="32.4" y="32.6" text="Search spot" />
+		<pin x="16.4" y="51.7" text="Search spot" />
+		<pin x="21.0" y="56.3" text="Search spot" />
+		<pin x="64.0" y="1.6" text="Search spot" />
+		<pin x="88.9" y="14.2" text="Search spot" />
+	</area>
+	<area name="Dis - Hall of Dispater" run="Dis">
+		<pin x="12.4" y="26.6" text="Search spot" />
+		<pin x="1.7" y="26.2" text="Search spot" />
+		<pin x="11.4" y="12.22" text="Search spot" />
+		<pin x="45.3" y="22.4" text="Search spot" />
+		<pin x="13.1" y="35.8" text="Search spot" />
+	</area>
+	
+	<area name="Minauros - Fetid Swamp" run="Minauros" />
+	<area name="Minauros - Jangling Hiter" run="Minauros">
+		<pin x="87.9" y="30.9" text="Search spot" />
+		<pin x="66.0" y="37.8" text="Search spot" />
+		<pin x="40.9" y="14.6" text="Search spot" />
+		<pin x="3.8" y="70.6" text="Search spot" />
+		<pin x="49.7" y="46.0" text="Search spot" />
+		<pin x="68.4" y="44.0" text="Search spot" />
+		<pin x="77.4" y="55.6" text="Search spot" />
+		<pin x="45.0" y="85.9" text="Search spot" />
+	</area>
+	<area name="Minauros - Quimath's Hold" run="Minauros">
+		<pin x="43.1" y="4.1" text="Search spot" />
+		<pin x="70.8" y="32.5" text="Search spot" />
+		<pin x="74.6" y="7.7" text="Search spot" />
+		<pin x="91.7" y="75.7" text="Search spot" />
+		<pin x="25.0" y="66.2" text="Search spot" />
+		<pin x="58.0" y="91.9" text="Search spot" />
+		<pin x="97.4" y="96.9" text="Search spot" />
+	</area>
+	
+	<area name="Phlegethos - Flamebreach" run="Phleg" />
+	<area name="Phlegethos - Gates of Flame" run="Phleg">
+		<pin x="30.1" y="2.7" text="Search spot" />
+		<pin x="18.1" y="16.5" text="Search spot" />
+		<pin x="59.2" y="2.6" text="Search spot" />
+		<pin x="87.4" y="85.6" text="Search spot" />
+		<pin x="91.2" y="92.7" text="Search spot" />
+		<pin x="27.6" y="29.9" text="Search spot" />
+		<pin x="61.1" y="57.7" text="Search spot" />
+	</area>
+	<area name="Phlegethos - Abriymoch" run="Phleg">
+		<pin x="13.7" y="36.3" text="Search spot" />
+		<pin x="25.9" y="18.1" text="Search spot" />
+		<pin x="97.4" y="61.0" text="Search spot" />
+		<pin x="64.2" y="84.2" text="Search spot" />
+		<pin x="81.1" y="96.5" text="Search spot - Lava" />
+		<pin x="13.5" y="84.7" text="Search spot" />
+		<pin x="42.7" y="93.8" text="Search spot" />
+	</area>
+
+	<area name="Stygia - Frozen Floes" run="Stygia" />
+	<area name="Stygia - Port Tantlin" run="Stygia">
+		<pin x="24.9" y="5.8" text="Search spot" />
+		<pin x="84.1" y="17.5" text="Search spot" />
+		<pin x="96.5" y="75.3" text="Search spot" />
+		<pin x="59.7" y="54.9" text="Search spot" />
+		<pin x="16.5" y="38.2" text="Search spot" />
+		<pin x="16.5" y="69.1" text="Search spot" />
+		<pin x="94.5" y="96" text="Search spot" />
+	</area>
+	<area name="Moriarty's Planar Emporium" run="Stygia" />
+	<area name="Stygia - Citadel of Ice" run="Stygia">
+		<pin x="42.8" y="27.2" text="Search spot" />
+		<pin x="83.4" y="7.5" text="Search spot" />
+		<pin x="82.6" y="28.8" text="Search spot" />
+		<pin x="14.3" y="4.9" text="Search spot" />
+		<pin x="16.7" y="46.4" text="Search spot" />
+		<pin x="23.6" y="75.4" text="Search spot" />
+		<pin x="25.2" y="92.3" text="Search spot" />
+		<pin x="48.5" y="94.8" text="Search spot" />
+	</area>
+	
+	<area name="Malbolge - Rocky Slopes" run="Malbolge" />
+	<area name="Malbolge - Rocky Chasm" run="Malbolge">
+		<pin x="89.8" y="94.9" text="Search spot" />
+		<pin x="66.0" y="67.4" text="Search spot" />
+		<pin x="36.1" y="67" text="Search spot" />
+		<pin x="33.3" y="15.0" text="Search spot" />
+		<pin x="54.7" y="26.8" text="Search spot" />
+		<pin x="76.9" y="5.1" text="Search spot" />
+	</area>
+	<area name="Malbolge - Rocky Depths" run="Malbolge">
+		<pin x="17.6" y="4.7" text="Search spot" />
+		<pin x="54.7" y="32.3" text="Search spot" />
+		<pin x="93.0" y="19.1" text="Search spot" />
+		<pin x="65.9" y="61.6" text="Search spot" />
+		<pin x="94.8" y="81.7" text="Search spot" />
+		<pin x="75.4" y="74.5" text="Search spot" />
+		<pin x="11.8" y="56.2" text="Search spot" />
+		<pin x="7.2" y="88.1" text="Search spot" />
+	</area>
+	
+	<area name="Maladomini - Ruined City" run="Maladomini" />
+	<area name="Maladomini - Malagard" run="Maladomini">
+		<pin x="30.0" y="30.7" text="Search spot" />
+		<pin x="5.6" y="46.8" text="Search spot" />
+		<pin x="23.4" y="61.1" text="Search spot" />
+		<pin x="64.7" y="37.6" text="Search spot" />
+		<pin x="75.6" y="22.1" text="Search spot" />
+		<pin x="66.7" y="44.9" text="Search spot" />
+		<pin x="33.3" y="55.2" text="Search spot" />
+	</area>
+	<area name="Maladomini - Baalzebul's Keep" run="Maladomini">
+		<pin x="45.2" y="37.7" text="Search spot" />
+		<pin x="81.2" y="4.7" text="Search spot" />
+		<pin x="23.3" y="2.1" text="Search spot" />
+		<pin x="2.1" y="65.9" text="Search spot" />
+		<pin x="32.0" y="96.6" text="Search spot" />
+		<pin x="57.7" y="87.7" text="Search spot" />
+		<pin x="92.7" y="42.0" text="Search spot" />
+	</area>
+	
+	<area name="Cania - Glacier Nargus" run="Cania" />
+	<area name="Cania - Mephistar" run="Cania">
+		<pin x="23.6" y="34.3" text="Search spot" />
+		<pin x="48.5" y="24.4" text="Search spot" />
+		<pin x="63.2" y="24.8" text="Search spot" />
+		<pin x="70.3" y="46.6" text="Search spot - Lava" />
+		<pin x="52.5" y="45.7" text="Search spot" />
+		<pin x="17.6" y="61.9" text="Search spot" />
+		<pin x="5.7" y="56.4" text="Search spot" />
+	</area>
+	<area name="Cania - Paean to Mephistopheles" run="Cania" type="Ignore" />
+	<area name="Cania - The Pit" run="Cania">
+		<pin x="94.1" y="29.9" text="Search spot" />
+		<pin x="22.4" y="26.8" text="Search spot - accessible after defeating Mephistopheles" />
+		<pin x="16.8" y="76.3" text="Search spot" />
+		<pin x="34.2" y="84.9" text="Search spot" />
+		<pin x="88.4" y="36.8" text="Search spot" />
+		<pin x="73.6" y="30.0" text="Search spot" />
+		<pin x="35.5" y="59.2" text="Search spot" />
+	</area>
+	
+	<area name="Nessus - The Rift" run="Nessus" />
+	<area name="Nessus - Malsheem" run="Nessus">
+		<pin x="57.1" y="19.3" text="Search spot" />
+		<pin x="82.7" y="39.3" text="Search spot" />
+		<pin x="79.4" y="19.3" text="Search spot" />
+		<pin x="62.8" y="79.5" text="Search spot" />
+		<pin x="32.8" y="79.4" text="Search spot" />
+		<pin x="22.6" y="85.5" text="Search spot" />
+		<pin x="24.9" y="34.3" text="Search spot" />
+	</area>
+	<area name="Nessus - Descent of Asmodeus" run="Nessus" type="Ignore" />
+	<area name="Nessus - The Serpent's Coil" run="Nessus">
+		<pin x="5.2" y="106.2" text="Search spot" />
+		<pin x="48.2" y="154.8" text="Search spot" />
+		<pin x="66.2" y="21.7" text="Search spot" />
+		<pin x="54.8" y="90.0" text="Search spot" />
+		<pin x="115.0" y="87.2" text="Search spot" />
+		<pin x="83.6" y="85.3" text="Search spot" />
+		<pin x="65.8" y="66.1" text="Search spot" />
+		<pin x="196.8" y="75.7" text="Search spot" />
+	</area>
+	<area name="Serpent's Belly" run="Nessus" />
+</runs>
