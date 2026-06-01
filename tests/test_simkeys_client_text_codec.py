@@ -51,6 +51,28 @@ class SimKeysClientTextCodecTests(unittest.TestCase):
         self.assertEqual(result["latest_seq"], 42)
         self.assertEqual(result["lines"], [{"seq": 42, "text": f"{NJAL_TRITONE}: hello"}])
 
+    def test_overlay_text_encodes_utf8_text(self):
+        class FakePipe:
+            payload = None
+
+            def xfer(self, op, payload=b""):
+                self_outer.assertEqual(op, simkeys.OP_OVERLAY_TEXT)
+                self.payload = payload
+                return op, struct.pack("iiii", 1, 200, 80, 0)
+
+        self_outer = self
+        pipe = FakePipe()
+        text = "TIMERS\nB\u00e9hl SAFE 3:36"
+        result = simkeys.overlay_show_text(pipe, text, overlay_id=7100, position="TL", font_size=16)
+
+        header_size = simkeys.OVERLAY_TEXT_HEADER.size
+        header = simkeys.OVERLAY_TEXT_HEADER.unpack(pipe.payload[:header_size])
+        payload = pipe.payload[header_size:]
+        self.assertEqual(result["success"], 1)
+        self.assertEqual(header[0], 7100)
+        self.assertEqual(header[-1], len(payload))
+        self.assertEqual(payload, text.encode("utf-8"))
+
 
 if __name__ == "__main__":
     unittest.main()

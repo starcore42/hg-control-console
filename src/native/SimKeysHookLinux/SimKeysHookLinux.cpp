@@ -3025,6 +3025,8 @@ int OverlayControlAreaWidth(int control_count) {
       (control_count - 1) * kOverlayControlGap;
 }
 
+uint32_t DecodeOverlayUtf8Codepoint(const char** cursor, const char* end);
+
 void MeasureOverlayText(const char* text, int font_size, int* out_width, int* out_height) {
   int longest = 0;
   int current = 0;
@@ -3051,8 +3053,8 @@ void MeasureOverlayText(const char* text, int font_size, int* out_width, int* ou
       line_start = true;
       continue;
     }
+    DecodeOverlayUtf8Codepoint(&cursor, nullptr);
     current += advance;
-    ++cursor;
     line_start = false;
   }
   if (current > longest) {
@@ -3245,9 +3247,136 @@ char UpperAscii(char value) {
   return value;
 }
 
-const uint8_t* OverlayGlyphRows(char value) {
+enum OverlayAccent {
+  kOverlayAccentNone = 0,
+  kOverlayAccentAcute,
+  kOverlayAccentGrave,
+  kOverlayAccentCircumflex,
+  kOverlayAccentTilde,
+  kOverlayAccentDiaeresis,
+  kOverlayAccentRing,
+  kOverlayAccentCedilla,
+  kOverlayAccentSlash,
+};
+
+bool OverlayHasByte(const unsigned char* cursor, const unsigned char* end, int offset) {
+  if (end != nullptr && cursor + offset >= end) {
+    return false;
+  }
+  return cursor[offset] != '\0';
+}
+
+uint32_t DecodeOverlayUtf8Codepoint(const char** cursor, const char* end) {
+  const unsigned char* input = reinterpret_cast<const unsigned char*>(*cursor);
+  const unsigned char* input_end = reinterpret_cast<const unsigned char*>(end);
+  if (input == nullptr || (input_end != nullptr && input >= input_end) || *input == '\0') {
+    return 0;
+  }
+
+  const unsigned char first = input[0];
+  if (first < 0x80u) {
+    *cursor = reinterpret_cast<const char*>(input + 1);
+    return static_cast<uint32_t>(first);
+  }
+
+  int extra = 0;
+  uint32_t codepoint = 0;
+  uint32_t minimum = 0;
+  if (first >= 0xC2u && first <= 0xDFu) {
+    extra = 1;
+    codepoint = first & 0x1Fu;
+    minimum = 0x80u;
+  } else if (first >= 0xE0u && first <= 0xEFu) {
+    extra = 2;
+    codepoint = first & 0x0Fu;
+    minimum = 0x800u;
+  } else if (first >= 0xF0u && first <= 0xF4u) {
+    extra = 3;
+    codepoint = first & 0x07u;
+    minimum = 0x10000u;
+  } else {
+    *cursor = reinterpret_cast<const char*>(input + 1);
+    return '?';
+  }
+
+  for (int index = 1; index <= extra; ++index) {
+    if (!OverlayHasByte(input, input_end, index) || (input[index] & 0xC0u) != 0x80u) {
+      *cursor = reinterpret_cast<const char*>(input + 1);
+      return '?';
+    }
+    codepoint = (codepoint << 6) | static_cast<uint32_t>(input[index] & 0x3Fu);
+  }
+
+  *cursor = reinterpret_cast<const char*>(input + extra + 1);
+  if (codepoint < minimum ||
+      codepoint > 0x10FFFFu ||
+      (codepoint >= 0xD800u && codepoint <= 0xDFFFu)) {
+    return '?';
+  }
+  return codepoint;
+}
+
+void OverlayGlyphForCodepoint(uint32_t codepoint, char* out_value, int* out_accent) {
+  char value = '?';
+  int accent = kOverlayAccentNone;
+  switch (codepoint) {
+    case 0x00C0u: case 0x00E0u: value = 'A'; accent = kOverlayAccentGrave; break;
+    case 0x00C1u: case 0x00E1u: value = 'A'; accent = kOverlayAccentAcute; break;
+    case 0x00C2u: case 0x00E2u: value = 'A'; accent = kOverlayAccentCircumflex; break;
+    case 0x00C3u: case 0x00E3u: value = 'A'; accent = kOverlayAccentTilde; break;
+    case 0x00C4u: case 0x00E4u: value = 'A'; accent = kOverlayAccentDiaeresis; break;
+    case 0x00C5u: case 0x00E5u: value = 'A'; accent = kOverlayAccentRing; break;
+    case 0x00C7u: case 0x00E7u: value = 'C'; accent = kOverlayAccentCedilla; break;
+    case 0x00C8u: case 0x00E8u: value = 'E'; accent = kOverlayAccentGrave; break;
+    case 0x00C9u: case 0x00E9u: value = 'E'; accent = kOverlayAccentAcute; break;
+    case 0x00CAu: case 0x00EAu: value = 'E'; accent = kOverlayAccentCircumflex; break;
+    case 0x00CBu: case 0x00EBu: value = 'E'; accent = kOverlayAccentDiaeresis; break;
+    case 0x00CCu: case 0x00ECu: value = 'I'; accent = kOverlayAccentGrave; break;
+    case 0x00CDu: case 0x00EDu: value = 'I'; accent = kOverlayAccentAcute; break;
+    case 0x00CEu: case 0x00EEu: value = 'I'; accent = kOverlayAccentCircumflex; break;
+    case 0x00CFu: case 0x00EFu: value = 'I'; accent = kOverlayAccentDiaeresis; break;
+    case 0x00D1u: case 0x00F1u: value = 'N'; accent = kOverlayAccentTilde; break;
+    case 0x00D2u: case 0x00F2u: value = 'O'; accent = kOverlayAccentGrave; break;
+    case 0x00D3u: case 0x00F3u: value = 'O'; accent = kOverlayAccentAcute; break;
+    case 0x00D4u: case 0x00F4u: value = 'O'; accent = kOverlayAccentCircumflex; break;
+    case 0x00D5u: case 0x00F5u: value = 'O'; accent = kOverlayAccentTilde; break;
+    case 0x00D6u: case 0x00F6u: value = 'O'; accent = kOverlayAccentDiaeresis; break;
+    case 0x00D8u: case 0x00F8u: value = 'O'; accent = kOverlayAccentSlash; break;
+    case 0x00D9u: case 0x00F9u: value = 'U'; accent = kOverlayAccentGrave; break;
+    case 0x00DAu: case 0x00FAu: value = 'U'; accent = kOverlayAccentAcute; break;
+    case 0x00DBu: case 0x00FBu: value = 'U'; accent = kOverlayAccentCircumflex; break;
+    case 0x00DCu: case 0x00FCu: value = 'U'; accent = kOverlayAccentDiaeresis; break;
+    case 0x00DDu: case 0x00FDu: value = 'Y'; accent = kOverlayAccentAcute; break;
+    case 0x00FFu: value = 'Y'; accent = kOverlayAccentDiaeresis; break;
+    case 0x00C6u: case 0x00E6u: value = 'A'; break;
+    case 0x00DEu: case 0x00FEu: value = 'P'; break;
+    case 0x00DFu: value = 'S'; break;
+    case 0x2018u: case 0x2019u: value = '\''; break;
+    case 0x201Cu: case 0x201Du: value = '"'; break;
+    case 0x2013u: case 0x2014u: value = '-'; break;
+    default:
+      if (codepoint < 0x80u) {
+        value = static_cast<char>(codepoint);
+      }
+      break;
+  }
+  if (out_value != nullptr) {
+    *out_value = value;
+  }
+  if (out_accent != nullptr) {
+    *out_accent = accent;
+  }
+}
+
+const uint8_t* OverlayGlyphRows(uint32_t codepoint, int* out_accent) {
   static const uint8_t space[7] = {0, 0, 0, 0, 0, 0, 0};
   static const uint8_t question[7] = {0x0E, 0x11, 0x01, 0x02, 0x04, 0x00, 0x04};
+  char value = '?';
+  int accent = kOverlayAccentNone;
+  OverlayGlyphForCodepoint(codepoint, &value, &accent);
+  if (out_accent != nullptr) {
+    *out_accent = accent;
+  }
   const char ch = UpperAscii(value);
   switch (ch) {
     case 'A': { static const uint8_t rows[7] = {0x0E, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11}; return rows; }
@@ -3339,11 +3468,65 @@ void DrawOverlayRectOutline(uint8_t* pixels, int width, int height, int x, int y
   FillOverlayRect(pixels, width, height, x + w - 1, y, 1, h, rgb, alpha);
 }
 
-void DrawOverlayGlyph(uint8_t* pixels, int width, int height, int x, int y, char ch, int scale, uint32_t rgb) {
+void DrawOverlayAccent(uint8_t* pixels, int width, int height, int x, int y, int accent, int scale, uint32_t rgb) {
+  if (accent == kOverlayAccentNone) {
+    return;
+  }
   if (scale < 1) {
     scale = 1;
   }
-  const uint8_t* rows = OverlayGlyphRows(ch);
+
+  switch (accent) {
+    case kOverlayAccentAcute:
+      FillOverlayRect(pixels, width, height, x + 3 * scale, y - 2 * scale, scale, scale, rgb, 255);
+      FillOverlayRect(pixels, width, height, x + 2 * scale, y - scale, scale, scale, rgb, 255);
+      break;
+    case kOverlayAccentGrave:
+      FillOverlayRect(pixels, width, height, x + scale, y - 2 * scale, scale, scale, rgb, 255);
+      FillOverlayRect(pixels, width, height, x + 2 * scale, y - scale, scale, scale, rgb, 255);
+      break;
+    case kOverlayAccentCircumflex:
+      FillOverlayRect(pixels, width, height, x + 2 * scale, y - 2 * scale, scale, scale, rgb, 255);
+      FillOverlayRect(pixels, width, height, x + scale, y - scale, scale, scale, rgb, 255);
+      FillOverlayRect(pixels, width, height, x + 3 * scale, y - scale, scale, scale, rgb, 255);
+      break;
+    case kOverlayAccentTilde:
+      FillOverlayRect(pixels, width, height, x + scale, y - 2 * scale, scale, scale, rgb, 255);
+      FillOverlayRect(pixels, width, height, x + 3 * scale, y - 2 * scale, scale, scale, rgb, 255);
+      FillOverlayRect(pixels, width, height, x + 2 * scale, y - scale, scale, scale, rgb, 255);
+      FillOverlayRect(pixels, width, height, x + 4 * scale, y - scale, scale, scale, rgb, 255);
+      break;
+    case kOverlayAccentDiaeresis:
+      FillOverlayRect(pixels, width, height, x + scale, y - 2 * scale, scale, scale, rgb, 255);
+      FillOverlayRect(pixels, width, height, x + 3 * scale, y - 2 * scale, scale, scale, rgb, 255);
+      break;
+    case kOverlayAccentRing:
+      FillOverlayRect(pixels, width, height, x + 2 * scale, y - 3 * scale, scale, scale, rgb, 255);
+      FillOverlayRect(pixels, width, height, x + scale, y - 2 * scale, scale, scale, rgb, 255);
+      FillOverlayRect(pixels, width, height, x + 3 * scale, y - 2 * scale, scale, scale, rgb, 255);
+      FillOverlayRect(pixels, width, height, x + 2 * scale, y - scale, scale, scale, rgb, 255);
+      break;
+    case kOverlayAccentCedilla:
+      FillOverlayRect(pixels, width, height, x + 2 * scale, y + 7 * scale, scale, scale, rgb, 255);
+      FillOverlayRect(pixels, width, height, x + scale, y + 8 * scale, scale, scale, rgb, 255);
+      break;
+    case kOverlayAccentSlash:
+      for (int row = 0; row < 7; ++row) {
+        const int col = 4 - (row * 5 / 7);
+        FillOverlayRect(pixels, width, height, x + col * scale, y + row * scale, scale, scale, rgb, 255);
+      }
+      break;
+    default:
+      break;
+  }
+}
+
+void DrawOverlayGlyph(uint8_t* pixels, int width, int height, int x, int y, uint32_t codepoint, int scale, uint32_t rgb) {
+  if (scale < 1) {
+    scale = 1;
+  }
+  int accent = kOverlayAccentNone;
+  const uint8_t* rows = OverlayGlyphRows(codepoint, &accent);
   for (int row = 0; row < 7; ++row) {
     for (int col = 0; col < 5; ++col) {
       if ((rows[row] & (1u << (4 - col))) == 0) {
@@ -3352,6 +3535,7 @@ void DrawOverlayGlyph(uint8_t* pixels, int width, int height, int x, int y, char
       FillOverlayRect(pixels, width, height, x + col * scale, y + row * scale, scale, scale, rgb, 255);
     }
   }
+  DrawOverlayAccent(pixels, width, height, x, y, accent, scale, rgb);
 }
 
 void DrawOverlayString(uint8_t* pixels, int width, int height, int x, int y, const char* text, int length, int scale, uint32_t rgb) {
@@ -3360,8 +3544,11 @@ void DrawOverlayString(uint8_t* pixels, int width, int height, int x, int y, con
   }
   int draw_x = x;
   const int advance = 6 * (scale > 0 ? scale : 1);
-  for (int index = 0; index < length && text[index] != '\0'; ++index) {
-    DrawOverlayGlyph(pixels, width, height, draw_x, y, text[index], scale, rgb);
+  const char* cursor = text;
+  const char* end = text + length;
+  while (cursor < end && *cursor != '\0') {
+    const uint32_t codepoint = DecodeOverlayUtf8Codepoint(&cursor, end);
+    DrawOverlayGlyph(pixels, width, height, draw_x, y, codepoint, scale, rgb);
     draw_x += advance;
   }
 }
