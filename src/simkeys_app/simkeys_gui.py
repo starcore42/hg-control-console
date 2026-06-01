@@ -24,7 +24,7 @@ from .simkeys_script_host import (
 BASIC_FUNCTIONS_SCRIPT_ID = "always_on"
 COORDINATE_FOLLOW_SCRIPT_ID = "coordinate_follow"
 TIMERS_SCRIPT_ID = "ingame_timers"
-CHARACTER_DEFAULTS_VERSION = 6
+CHARACTER_DEFAULTS_VERSION = 7
 DEFAULT_AUTO_START_SCRIPT_IDS = (BASIC_FUNCTIONS_SCRIPT_ID, TIMERS_SCRIPT_ID)
 CLIENT_PANE_DEFAULT_WIDTH = 430
 CLIENT_PANE_MIN_WIDTH = 360
@@ -1317,6 +1317,14 @@ class SimKeysDesktopApp:
             if key not in config or abs(current - old_value) < 0.0001:
                 config[key] = new_value
 
+    def _migrate_coordinate_follow_safety_defaults(self, config):
+        try:
+            current = float(config.get("max_follow_distance", 300.0))
+        except (TypeError, ValueError):
+            current = 300.0
+        if "max_follow_distance" not in config or abs(current - 300.0) < 0.0001:
+            config["max_follow_distance"] = CoordinateFollowScript.DEFAULT_MAX_FOLLOW_DISTANCE
+
     def _load_character_defaults_store(self):
         self.character_script_configs = {}
         self.character_script_autostart = {}
@@ -1377,6 +1385,8 @@ class SimKeysDesktopApp:
                         cleaned_config["bypass_no_walk"] = True
                 if payload_version < 6 and script_id == COORDINATE_FOLLOW_SCRIPT_ID:
                     self._migrate_coordinate_follow_timing_defaults(cleaned_config)
+                if payload_version < 7 and script_id == COORDINATE_FOLLOW_SCRIPT_ID:
+                    self._migrate_coordinate_follow_safety_defaults(cleaned_config)
                 cleaned[script_id] = cleaned_config
 
             auto_start = entry.get("auto_start", [])

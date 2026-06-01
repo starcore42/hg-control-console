@@ -47,7 +47,7 @@ class FakeScriptManager:
                 "role": "Follower",
                 "distance_threshold": 1.0,
                 "formation_radius": 0.0,
-                "max_follow_distance": 300.0,
+                "max_follow_distance": 30.0,
                 "bypass_no_walk": True,
             }
         if script_id == "auto_attack":
@@ -115,6 +115,7 @@ class GuiSavedScriptsTests(unittest.TestCase):
         self.assertEqual(config["follow_interval_seconds"], CoordinateFollowScript.DEFAULT_FOLLOW_INTERVAL_SECONDS)
         self.assertEqual(config["position_poll_interval"], CoordinateFollowScript.DEFAULT_POSITION_POLL_INTERVAL)
         self.assertEqual(config["poll_interval"], CoordinateFollowScript.DEFAULT_POLL_INTERVAL)
+        self.assertEqual(config["max_follow_distance"], CoordinateFollowScript.DEFAULT_MAX_FOLLOW_DISTANCE)
         self.assertEqual(ClientScriptHost.DAMAGE_METER_POLL_INTERVAL, 0.20)
 
     def test_legacy_auto_damage_current_weapon_is_removed_from_saved_defaults(self):
@@ -267,6 +268,39 @@ class GuiSavedScriptsTests(unittest.TestCase):
             self.assertEqual(config["position_poll_interval"], 1.5)
             self.assertEqual(config["poll_interval"], 0.3)
 
+    def test_legacy_coordinate_follow_max_distance_default_is_migrated(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "character_defaults.user.json")
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(
+                    """{
+  "version": 6,
+  "characters": {
+    "starcore-bob": {
+      "display_name": "Starcore-Bob",
+      "scripts": {
+        "coordinate_follow": {
+          "role": "Follower",
+          "distance_threshold": 1.0,
+          "formation_radius": 0.0,
+          "max_follow_distance": 300.0,
+          "bypass_no_walk": true
+        }
+      }
+    }
+  }
+}
+"""
+                )
+            app = make_persistence_app(path)
+            app._load_character_defaults_store()
+            record = SimpleNamespace(pid=202, character_name="Starcore-Bob", display_name="Starcore-Bob")
+
+            self.assertTrue(app._auto_load_character_defaults(record))
+
+            config = app.get_script_config(202, "coordinate_follow")
+            self.assertEqual(config["max_follow_distance"], CoordinateFollowScript.DEFAULT_MAX_FOLLOW_DISTANCE)
+
     def test_coordinate_follow_lead_is_singleton_and_disables_basic_follow(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             path = os.path.join(tmpdir, "character_defaults.user.json")
@@ -331,7 +365,7 @@ class GuiSavedScriptsTests(unittest.TestCase):
                         "role": "Lead",
                         "distance_threshold": 1.0,
                         "formation_radius": 0.0,
-                        "max_follow_distance": 300.0,
+                        "max_follow_distance": 30.0,
                         "bypass_no_walk": True,
                     },
                 ),
@@ -343,7 +377,7 @@ class GuiSavedScriptsTests(unittest.TestCase):
                         "role": "Follower",
                         "distance_threshold": 1.0,
                         "formation_radius": 0.0,
-                        "max_follow_distance": 300.0,
+                        "max_follow_distance": 30.0,
                         "bypass_no_walk": True,
                     },
                 ),

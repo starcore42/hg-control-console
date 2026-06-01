@@ -812,6 +812,7 @@ class ChatEventTests(unittest.TestCase):
                 "distance_threshold": 0.1,
                 "formation_radius": 0.0,
                 "combat_grace_seconds": 0.0,
+                "max_follow_distance": 1000.0,
             },
             follower_host,
         )
@@ -854,6 +855,7 @@ class ChatEventTests(unittest.TestCase):
                 "formation_radius": 0.0,
                 "combat_grace_seconds": 0.0,
                 "bypass_no_walk": True,
+                "max_follow_distance": 1000.0,
             },
             follower_host,
         )
@@ -899,6 +901,7 @@ class ChatEventTests(unittest.TestCase):
                 "distance_threshold": 0.0,
                 "combat_grace_seconds": 0.0,
                 "formation_radius": 0.5,
+                "max_follow_distance": 1000.0,
             },
             follower_host,
         )
@@ -1021,6 +1024,7 @@ class ChatEventTests(unittest.TestCase):
                 "follow_interval_seconds": 0.1,
                 "distance_threshold": 0.0,
                 "combat_grace_seconds": 0.0,
+                "max_follow_distance": 1000.0,
             },
             follower_host,
         )
@@ -1033,6 +1037,47 @@ class ChatEventTests(unittest.TestCase):
 
             self.assertIn("skipped", follower.status_text.lower())
             self.assertFalse([event for event in follower_host.events if event[0] == "error"])
+        finally:
+            follower.on_stop()
+            lead.on_stop()
+
+    def test_coordinate_follow_default_max_distance_skips_far_lead(self):
+        lead_host = FakeHost()
+        lead_host.client.pid = 405
+        lead_host.client.character_name = "Starcore-Lead [1.0]"
+        lead_host.client.display_name = "Starcore-Lead [1.0]"
+        lead_host.position = (60.0, 20.0, 0.0)
+        lead = CoordinateFollowScript(
+            lead_host.client,
+            {"role": CoordinateFollowScript.ROLE_LEAD, "position_poll_interval": 0.05},
+            lead_host,
+        )
+
+        follower_host = FakeHost()
+        follower_host.client.pid = 406
+        follower_host.client.character_name = "Starcore-Follower [1.0]"
+        follower_host.client.display_name = "Starcore-Follower [1.0]"
+        follower_host.position = (10.0, 20.0, 0.0)
+        follower = CoordinateFollowScript(
+            follower_host.client,
+            {
+                "role": CoordinateFollowScript.ROLE_FOLLOWER,
+                "follow_interval_seconds": 0.1,
+                "distance_threshold": 0.0,
+                "combat_grace_seconds": 0.0,
+            },
+            follower_host,
+        )
+
+        try:
+            lead.on_start()
+            lead.on_tick()
+            follower.on_start()
+            follower.on_tick()
+
+            self.assertEqual(follower_host.moves, [])
+            self.assertIn("far", follower.status_text.lower())
+            self.assertIn("> 30.0", follower.get_state_details()["last_guard_reason"])
         finally:
             follower.on_stop()
             lead.on_stop()
