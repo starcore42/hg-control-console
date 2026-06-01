@@ -6264,7 +6264,6 @@ class AutoAttackScript(ClientScriptBase):
         self.loop_stop = threading.Event()
         self.last_error_key = ""
         self.last_combat_at = 0.0
-        self.db = hgx_data.load_default_database()
 
     def needs_chat_feed(self) -> bool:
         return True
@@ -6276,18 +6275,8 @@ class AutoAttackScript(ClientScriptBase):
         if not self.enabled:
             return
 
-        attacker = ""
-        defender = ""
-        if event.attack:
-            attacker = event.attack.attacker
-            defender = event.attack.defender
-        elif event.damage:
-            attacker = event.damage.attacker
-            defender = event.damage.defender
-
-        if attacker and self._actor_is_self(attacker):
-            if self.db.lookup(defender) is not None:
-                self.last_combat_at = time.monotonic()
+        if event.attack is not None or event.damage is not None:
+            self.last_combat_at = time.monotonic()
 
     def on_start(self):
         super().on_start()

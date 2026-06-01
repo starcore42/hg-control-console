@@ -121,7 +121,7 @@ class TestAutoAttackCombat(unittest.TestCase):
         self.script = AutoAttackScript(self.host.client, {"cooldown_seconds": 1.0}, self.host)
         self.script.enabled = True
 
-    def test_combat_tracking_matches_auto_action(self):
+    def test_combat_tracking_uses_any_parsed_attack_line(self):
         self.assertEqual(self.script.last_combat_at, 0.0)
 
         event = parse_chat_line_event(1, "PlayerCharacter attacks Aboleth")
@@ -132,14 +132,21 @@ class TestAutoAttackCombat(unittest.TestCase):
         self.script.last_combat_at = 0.0
         event = parse_chat_line_event(2, "PlayerCharacter attacks FriendlyNPC")
         self.script.on_chat_event(event)
-        self.assertEqual(self.script.last_combat_at, 0.0)
+        self.assertGreater(self.script.last_combat_at, 0.0)
 
+        self.script.last_combat_at = 0.0
         event = parse_chat_line_event(3, "OtherPlayer attacks Aboleth")
         self.script.on_chat_event(event)
-        self.assertEqual(self.script.last_combat_at, 0.0)
+        self.assertGreater(self.script.last_combat_at, 0.0)
 
-    def test_damage_tracking_matches_auto_action(self):
+    def test_damage_tracking_uses_any_parsed_damage_line(self):
         event = parse_chat_line_event(1, "PlayerCharacter damages Aboleth: 10 (10 physical)")
+        self.script.on_chat_event(event)
+
+        self.assertGreater(self.script.last_combat_at, 0.0)
+
+        self.script.last_combat_at = 0.0
+        event = parse_chat_line_event(2, "OtherPlayer damages Aboleth: 10 (10 physical)")
         self.script.on_chat_event(event)
 
         self.assertGreater(self.script.last_combat_at, 0.0)
