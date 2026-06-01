@@ -5,6 +5,7 @@ import math
 import ctypes as C
 import re
 import struct
+import unicodedata
 import weakref
 from xml.etree import ElementTree as ET
 from copy import deepcopy
@@ -644,7 +645,40 @@ def parse_chat_line_event(sequence: int, text: str, password_prompt_text: str = 
 
 
 def _area_pin_key(name: str) -> str:
-    return re.sub(r"\s+", " ", str(name or "").strip()).casefold()
+    value = str(name or "")
+    for mojibake, replacement in (
+        ("\u00e2\u20ac\u2122", "'"),
+        ("\u00e2\u20ac\u02dc", "'"),
+        ("\u00e2\u20ac\u0161", "'"),
+        ("\u00e2\u20ac\u0153", '"'),
+        ("\u00e2\u20ac\u201c", "-"),
+        ("\u00e2\u20ac\u201d", "-"),
+    ):
+        value = value.replace(mojibake, replacement)
+    value = unicodedata.normalize("NFKC", value)
+    value = value.translate({
+        ord("`"): "'",
+        ord("\u00b4"): "'",
+        ord("\u2018"): "'",
+        ord("\u2019"): "'",
+        ord("\u201a"): "'",
+        ord("\u201b"): "'",
+        ord("\u02bc"): "'",
+        ord("\u02b9"): "'",
+        ord("\uff07"): "'",
+        ord("\u2010"): "-",
+        ord("\u2011"): "-",
+        ord("\u2012"): "-",
+        ord("\u2013"): "-",
+        ord("\u2014"): "-",
+        ord("\u2015"): "-",
+        ord("\u2212"): "-",
+    })
+    value = value.replace("\ufffd", "")
+    value = re.sub(r"\s*-\s*", " - ", value)
+    value = re.sub(r"\s+", " ", value.strip())
+    value = value.replace("'", "")
+    return value.casefold()
 
 
 def _load_hgx_area_map_pins(source_dir: str) -> Tuple[AreaMapPinSet, ...]:

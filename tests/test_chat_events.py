@@ -787,6 +787,38 @@ class ChatEventTests(unittest.TestCase):
         self.assertEqual(host.map_pins, [(1.0, 2.0, "A"), (3.5, 4.25, "B")])
         self.assertIn("2 pins", script.status_text)
 
+    def test_map_pins_matches_area_name_punctuation_variants(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, "areas.xml"), "w", encoding="utf-8") as fp:
+                fp.write(
+                    """<runs>
+  <area name=\"Maladomini - Baalzebul's Keep\" run=\"Maladomini 3\">
+    <pin x=\"45.2\" y=\"37.7\" text=\"Search spot\" />
+  </area>
+</runs>
+"""
+                )
+
+            transition_lines = (
+                "You are now in Maladomini - Baalzebul\u2019s Keep.",
+                "You are now in Maladomini - Baalzebuls Keep.",
+                "You are now in Maladomini \u2013 Baalzebul\u2019s Keep.",
+                "You are now in Maladomini \u00e2\u20ac\u201c Baalzebul\u00e2\u20ac\u2122s Keep.",
+            )
+            for transition in transition_lines:
+                with self.subTest(transition=transition):
+                    host = FakeHost()
+                    script = MapPinsScript(
+                        host.client,
+                        {"areas_dir": tmp, "include_backlog": True},
+                        host,
+                    )
+                    script.on_start()
+                    script.on_chat_event(parse_chat_line_event(1, transition))
+
+                    self.assertEqual(host.map_pins, [(45.2, 37.7, "Search spot")])
+                    self.assertIn("1 pins", script.status_text)
+
     def test_coordinate_follow_spam_moves_to_published_lead_position(self):
         lead_host = FakeHost()
         lead_host.client.pid = 100
