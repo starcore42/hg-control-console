@@ -3016,6 +3016,10 @@ int OverlayLineHeight(int font_size) {
   return OverlayGlyphHeight(font_size) + 4;
 }
 
+int OverlayHeaderHeight(int font_size) {
+  return OverlayGlyphHeight(font_size) + kOverlayTextPadding * 2;
+}
+
 int OverlayControlAreaWidth(int control_count) {
   if (control_count <= 0) {
     return 0;
@@ -3064,7 +3068,15 @@ void MeasureOverlayText(const char* text, int font_size, int* out_width, int* ou
     *out_width = kOverlayTextPadding * 2 + longest;
   }
   if (out_height != nullptr) {
-    *out_height = kOverlayTextPadding * 2 + lines * OverlayLineHeight(font_size);
+    const int header_height = OverlayHeaderHeight(font_size);
+    if (lines <= 1) {
+      *out_height = header_height;
+    } else {
+      *out_height = header_height +
+          kOverlayTextPadding +
+          (lines - 1) * OverlayLineHeight(font_size) +
+          kOverlayTextPadding;
+    }
   }
 }
 
@@ -3695,13 +3707,14 @@ uint8_t* BuildOverlayPixels(
   if (visible != nullptr && visible[0] != '\0') {
     const int text_scale = OverlayFontScale(record.font_size);
     const int line_height = OverlayLineHeight(record.font_size);
-    const int header_height = line_height + kOverlayTextPadding * 2;
+    const int header_height = OverlayHeaderHeight(record.font_size);
     const int panel_y = controls_height;
     FillOverlayRect(pixels, record.width, record.height, 0, panel_y, record.width, header_height, 0x182024, 200);
     DrawOverlayRectOutline(pixels, record.width, record.height, 0, panel_y, record.width, record.height - panel_y, 0x5A6E78, 220);
     FillOverlayRect(pixels, record.width, record.height, 0, panel_y + header_height, record.width, 1, 0x5A6E78, 220);
 
     int line_y = panel_y + kOverlayTextPadding;
+    int line_index = 0;
     uint32_t color = record.color_rgb != 0 ? record.color_rgb : 0xFFFFFFu;
     const char* cursor = visible;
     while (*cursor != '\0' && line_y < record.height - kOverlayTextPadding) {
@@ -3723,7 +3736,6 @@ uint8_t* BuildOverlayPixels(
           line_len,
           text_scale,
           color);
-      line_y += line_height;
       cursor = line_end;
       if (*cursor == '\r') {
         ++cursor;
@@ -3732,6 +3744,12 @@ uint8_t* BuildOverlayPixels(
         }
       } else if (*cursor == '\n') {
         ++cursor;
+      }
+      ++line_index;
+      if (line_index == 1) {
+        line_y = panel_y + header_height + kOverlayTextPadding;
+      } else {
+        line_y += line_height;
       }
     }
   }
