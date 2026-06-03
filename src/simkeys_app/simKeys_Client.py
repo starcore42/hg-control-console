@@ -220,11 +220,12 @@ class UnixSocketPipe:
 
 Pipe = WindowsPipe if IS_WINDOWS else UnixSocketPipe
 
-OP_QUERY=3000; OP_SLOT=3001; OP_VK=3002; OP_SETLOG=3003; OP_REPLAY=3004; OP_SNAPSHOT=3005; OP_CHAT_SEND=3006; OP_CHAT_POLL=3007; OP_SLOT_PAGE=3008; OP_OVERLAY_TEXT=3009; OP_OVERLAY_CLEAR=3010; OP_OVERLAY_CLEAR_ALL=3011; OP_MOVE_TO_LOCATION=3012; OP_SET_WALK_BYPASS=3013; OP_SET_ACTION_MODE=3014; OP_MAP_PIN=3015
+OP_QUERY=3000; OP_SLOT=3001; OP_VK=3002; OP_SETLOG=3003; OP_REPLAY=3004; OP_SNAPSHOT=3005; OP_CHAT_SEND=3006; OP_CHAT_POLL=3007; OP_SLOT_PAGE=3008; OP_OVERLAY_TEXT=3009; OP_OVERLAY_CLEAR=3010; OP_OVERLAY_CLEAR_ALL=3011; OP_MOVE_TO_LOCATION=3012; OP_SET_WALK_BYPASS=3013; OP_SET_ACTION_MODE=3014; OP_MAP_PIN=3015; OP_QUICKBAR_WEAPONS=3016
 QUERY_STRUCT_LEGACY = struct.Struct("<" + ("I" * 24) + ("i" * 10) + "I" + ("i" * 2) + ("I" * 4) + f"{CHAR_NAME_CAPACITY}s")
 QUERY_STRUCT = struct.Struct("<" + ("I" * 24) + ("i" * 10) + "I" + ("i" * 2) + ("I" * 4) + "ifff" + f"{CHAR_NAME_CAPACITY}s")
 QUERY_STRUCT_WITH_CREATURE = struct.Struct("<" + ("I" * 24) + ("i" * 10) + ("I" * 2) + ("i" * 2) + ("I" * 4) + "ifff" + f"{CHAR_NAME_CAPACITY}s")
 QUERY_STRUCT_WITH_HEALTH = struct.Struct(QUERY_STRUCT_WITH_CREATURE.format + "iiIIi")
+TRIGGER_RESPONSE = struct.Struct("<iiiiii")
 OVERLAY_TEXT_HEADER = struct.Struct("<iiiiiIi")
 OVERLAY_RESPONSE = struct.Struct("<iiii")
 MOVE_TO_LOCATION_REQUEST = struct.Struct("<fffiIi")
@@ -234,6 +235,17 @@ SET_ACTION_MODE_REQUEST = struct.Struct("<ii")
 SET_ACTION_MODE_RESPONSE = struct.Struct("<iiiiii")
 MAP_PIN_REQUEST_HEADER = struct.Struct("<ffi")
 MAP_PIN_RESPONSE = struct.Struct("<iii")
+QUICKBAR_WEAPON_DAMAGE_TYPE_COUNT = 16
+QUICKBAR_WEAPON_MAX_DAMAGE_ROWS = 16
+QUICKBAR_WEAPON_RESPONSE_HEADER = struct.Struct("<iii")
+QUICKBAR_WEAPON_PROPERTY_ROW = struct.Struct("<iiiiiiii")
+QUICKBAR_WEAPON_ENTRY = struct.Struct(
+    "<iiiiIIIIIiiiiiiiiiII"
+    + ("i" * QUICKBAR_WEAPON_DAMAGE_TYPE_COUNT)
+    + ("i" * QUICKBAR_WEAPON_DAMAGE_TYPE_COUNT)
+    + "i"
+    + ("iiiiiiii" * QUICKBAR_WEAPON_MAX_DAMAGE_ROWS)
+)
 OVERLAY_POSITIONS = {
     "ABSOLUTE": 0,
     "A": 0,
@@ -407,6 +419,314 @@ def query_state(p):
         "player_hp_available": health_available,
         "character_name": decode_cstring(character_name_raw),
     }
+
+def _quickbar_weapon_detail_payload(detail_slots=None):
+    if not detail_slots:
+        return b""
+    low = 0
+    high = 0
+    for page, slot in detail_slots:
+        bit_index = int(page) * 12 + (int(slot) - 1)
+        if bit_index < 0 or bit_index >= 36:
+            continue
+        if bit_index < 32:
+            low |= 1 << bit_index
+        else:
+            high |= 1 << (bit_index - 32)
+    return struct.pack("II", low, high)
+
+
+def quickbar_weapon_info(p, detail_slots=None):
+    _, data = p.xfer(OP_QUICKBAR_WEAPONS, _quickbar_weapon_detail_payload(detail_slots))
+    if len(data) == TRIGGER_RESPONSE.size:
+        success, vk, rc, aux_rc, err, path = TRIGGER_RESPONSE.unpack(data)
+        return {
+            "success": False,
+            "supported": False,
+            "count": 0,
+            "last_error": int(err),
+            "trigger_response": {
+                "success": success,
+                "vk": vk,
+                "rc": rc,
+                "aux_rc": aux_rc,
+                "err": err,
+                "path": path,
+            },
+            "entries": [],
+            "entries_by_slot": {},
+        }
+    if len(data) < QUICKBAR_WEAPON_RESPONSE_HEADER.size:
+        raise RuntimeError(
+            f"unexpected quickbar-weapons payload size: got {len(data)}, expected at least {QUICKBAR_WEAPON_RESPONSE_HEADER.size}"
+        )
+
+    success, count, last_error = QUICKBAR_WEAPON_RESPONSE_HEADER.unpack_from(data, 0)
+    available = (len(data) - QUICKBAR_WEAPON_RESPONSE_HEADER.size) // QUICKBAR_WEAPON_ENTRY.size
+    count = max(0, min(int(count), available))
+    entries = []
+    offset = QUICKBAR_WEAPON_RESPONSE_HEADER.size
+    for _ in range(count):
+        values = QUICKBAR_WEAPON_ENTRY.unpack_from(data, offset)
+        offset += QUICKBAR_WEAPON_ENTRY.size
+        (
+            page,
+            slot,
+            bit_index,
+            slot_type,
+            slot_ptr,
+            primary_item_id,
+            secondary_item_id,
+            primary_item_ptr,
+            secondary_item_ptr,
+            primary_equipped,
+            secondary_equipped,
+            primary_active_property_count,
+            primary_passive_property_count,
+            secondary_active_property_count,
+            secondary_passive_property_count,
+            primary_detail_requested,
+            secondary_detail_requested,
+            damage_row_count,
+            primary_damage_mask,
+            secondary_damage_mask,
+        ) = values[:20]
+        primary_damage_amounts = tuple(values[20:20 + QUICKBAR_WEAPON_DAMAGE_TYPE_COUNT])
+        secondary_damage_amounts = tuple(values[20 + QUICKBAR_WEAPON_DAMAGE_TYPE_COUNT:20 + QUICKBAR_WEAPON_DAMAGE_TYPE_COUNT * 2])
+        error_index = 20 + QUICKBAR_WEAPON_DAMAGE_TYPE_COUNT * 2
+        error = int(values[error_index])
+        rows_flat = values[error_index + 1:]
+        stored_rows = min(max(int(damage_row_count), 0), QUICKBAR_WEAPON_MAX_DAMAGE_ROWS)
+        damage_rows = []
+        for row_index in range(stored_rows):
+            row_offset = row_index * 8
+            (
+                hand,
+                list_kind,
+                property_name,
+                subtype,
+                cost_table,
+                cost_value,
+                param1,
+                param1_value,
+            ) = rows_flat[row_offset:row_offset + 8]
+            damage_rows.append({
+                "hand": int(hand),
+                "list": int(list_kind),
+                "property_name": int(property_name),
+                "subtype": int(subtype),
+                "cost_table": int(cost_table),
+                "cost_value": int(cost_value),
+                "param1": int(param1),
+                "param1_value": int(param1_value),
+            })
+        entries.append({
+            "page": int(page),
+            "slot": int(slot),
+            "bit_index": int(bit_index),
+            "slot_type": int(slot_type),
+            "slot_ptr": int(slot_ptr),
+            "primary_item_id": int(primary_item_id),
+            "secondary_item_id": int(secondary_item_id),
+            "primary_item_ptr": int(primary_item_ptr),
+            "secondary_item_ptr": int(secondary_item_ptr),
+            "primary_equipped": int(primary_equipped),
+            "secondary_equipped": int(secondary_equipped),
+            "primary_active_property_count": int(primary_active_property_count),
+            "primary_passive_property_count": int(primary_passive_property_count),
+            "secondary_active_property_count": int(secondary_active_property_count),
+            "secondary_passive_property_count": int(secondary_passive_property_count),
+            "primary_detail_requested": int(primary_detail_requested),
+            "secondary_detail_requested": int(secondary_detail_requested),
+            "damage_row_count": int(damage_row_count),
+            "primary_damage_mask": int(primary_damage_mask),
+            "secondary_damage_mask": int(secondary_damage_mask),
+            "primary_damage_amounts": primary_damage_amounts,
+            "secondary_damage_amounts": secondary_damage_amounts,
+            "error": error,
+            "damage_rows": damage_rows,
+            "damage_rows_truncated": int(damage_row_count) > len(damage_rows),
+        })
+
+    return {
+        "success": bool(success),
+        "supported": True,
+        "count": count,
+        "last_error": int(last_error),
+        "entries": entries,
+        "entries_by_slot": {(entry["page"], entry["slot"]): entry for entry in entries},
+    }
+
+ITEMPROP_DAMAGE_TYPE_LABELS = {
+    0: "Bludgeoning",
+    1: "Piercing",
+    2: "Slashing",
+    3: "Subdual",
+    4: "Physical",
+    5: "Magical",
+    6: "Acid",
+    7: "Cold",
+    8: "Divine",
+    9: "Electrical",
+    10: "Fire",
+    11: "Negative",
+    12: "Positive",
+    13: "Sonic",
+    14: "Ectoplasmic",
+    15: "Psionic",
+}
+
+ITEMPROP_DAMAGE_COST_LABELS = {
+    1: "1",
+    2: "2",
+    3: "3",
+    4: "4",
+    5: "5",
+    6: "1d4",
+    7: "1d6",
+    8: "1d8",
+    9: "1d10",
+    10: "2d6",
+    11: "2d8",
+    12: "2d4",
+    13: "2d10",
+    14: "1d12",
+    15: "2d12",
+    16: "6",
+    17: "7",
+    18: "8",
+    19: "9",
+    20: "10",
+    21: "11",
+    22: "12",
+    23: "13",
+    24: "14",
+    25: "15",
+    26: "16",
+    27: "17",
+    28: "18",
+    29: "19",
+    30: "20",
+    38: "1d12",
+    39: "2d12",
+    40: "3d12",
+    41: "4d12",
+    42: "5d12",
+    43: "6d12",
+    44: "7d12",
+    45: "8d12",
+    46: "9d12",
+    47: "10d12",
+    48: "1d20",
+    49: "2d20",
+    50: "3d20",
+    51: "4d20",
+    52: "5d20",
+    53: "6d20",
+    54: "7d20",
+    55: "8d20",
+    56: "9d20",
+    57: "10d20",
+    78: "3d12",
+    79: "4d12",
+    80: "5d12",
+    81: "6d12",
+    82: "7d12",
+    83: "8d12",
+    84: "9d12",
+    85: "10d12",
+    124: "11d12",
+    125: "12d12",
+    126: "13d12",
+    127: "14d12",
+    128: "15d12",
+    129: "16d12",
+    130: "17d12",
+    131: "18d12",
+    132: "19d12",
+    133: "20d12",
+}
+
+ITEMPROP_DAMAGE_PROPERTY_LABELS = {
+    16: "Damage Bonus",
+    17: "Damage Bonus vs Alignment Group",
+    18: "Damage Bonus vs Racial Group",
+    19: "Damage Bonus vs Specific Alignment",
+}
+
+
+def _format_quickbar_weapon_prop_count(value):
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        return "?"
+    return "?" if value < 0 else str(value)
+
+
+def _format_quickbar_weapon_damage_row(row):
+    property_name = int(row.get("property_name") or 0)
+    subtype = int(row.get("subtype") or 0)
+    cost_value = int(row.get("cost_value") or 0)
+    active = int(row.get("param1") or 0)
+    param1_value = int(row.get("param1_value") or 0)
+    property_label = ITEMPROP_DAMAGE_PROPERTY_LABELS.get(property_name, f"prop={property_name}")
+    damage_type_value = subtype if property_name == 16 else param1_value
+    damage_type = ITEMPROP_DAMAGE_TYPE_LABELS.get(damage_type_value, f"type={damage_type_value}")
+    damage_amount = ITEMPROP_DAMAGE_COST_LABELS.get(cost_value, f"cost={cost_value}")
+    active_text = f" active={active}" if active else ""
+    return (
+        f"{property_label} {damage_type} {damage_amount} "
+        f"(prop={property_name} subtype={subtype} cost={cost_value} param={param1_value}{active_text})"
+    )
+
+
+def format_quickbar_weapon_rows(entry):
+    rows = list((entry or {}).get("damage_rows") or [])
+    if not rows:
+        return "damage=<none>"
+    parts = []
+    for row in rows:
+        hand = "main" if row.get("hand") == 1 else "off"
+        list_value = row.get("list")
+        if list_value == 1:
+            list_kind = "A"
+        elif list_value == 3 and int(row.get("param1") or 0):
+            list_kind = "T"
+        elif list_value == 3:
+            list_kind = "D"
+        else:
+            list_kind = "P"
+        parts.append(f"{hand}/{list_kind}:{_format_quickbar_weapon_damage_row(row)}")
+    if (entry or {}).get("damage_rows_truncated"):
+        parts.append("...")
+    return "damage=[" + "; ".join(parts) + "]"
+
+def format_quickbar_weapon_entry(entry):
+    if not entry:
+        return "no hook data"
+    primary_active_props = _format_quickbar_weapon_prop_count(entry.get("primary_active_property_count", -1))
+    primary_passive_props = _format_quickbar_weapon_prop_count(entry.get("primary_passive_property_count", -1))
+    primary_detail_requested = " detailReq=1" if entry.get("primary_detail_requested", 0) else ""
+    primary = (
+        f"primary id={phex(entry.get('primary_item_id', 0))} ptr={phex(entry.get('primary_item_ptr', 0))} "
+        f"equipped={entry.get('primary_equipped', 0)} props=A{primary_active_props}/P{primary_passive_props} "
+        f"mask=0x{entry.get('primary_damage_mask', 0):04X}{primary_detail_requested}"
+    )
+    secondary = ""
+    if entry.get("secondary_item_id", 0) and entry.get("secondary_item_id", 0) != 0x7F000000:
+        secondary_active_props = _format_quickbar_weapon_prop_count(entry.get("secondary_active_property_count", -1))
+        secondary_passive_props = _format_quickbar_weapon_prop_count(entry.get("secondary_passive_property_count", -1))
+        secondary_detail_requested = " detailReq=1" if entry.get("secondary_detail_requested", 0) else ""
+        secondary = (
+            f"; secondary id={phex(entry.get('secondary_item_id', 0))} ptr={phex(entry.get('secondary_item_ptr', 0))} "
+            f"equipped={entry.get('secondary_equipped', 0)} props=A{secondary_active_props}/P{secondary_passive_props} "
+            f"mask=0x{entry.get('secondary_damage_mask', 0):04X}{secondary_detail_requested}"
+        )
+    error = f"; err={entry.get('error', 0)}" if entry.get("error", 0) else ""
+    return (
+        f"slotType={entry.get('slot_type', -1)} slotPtr={phex(entry.get('slot_ptr', 0))}; "
+        f"{primary}{secondary}; {format_quickbar_weapon_rows(entry)}{error}"
+    )
 
 def cmd_query(p):
     result = query_state(p)
@@ -630,6 +950,38 @@ def cmd_map_pin(p, x, y, text):
     result = add_map_pin(p, x, y, text)
     print(f"map-pin: success={result['success']} rc={result['rc']} err={result['err']}")
 
+def _parse_quickbar_detail_slot(value):
+    text = str(value or "").strip()
+    if not text:
+        raise ValueError("empty slot")
+    lowered = text.lower().replace(" ", "")
+    if "/" in lowered:
+        lowered = lowered.rsplit("/", 1)[-1]
+    if lowered.startswith("ctrl+f"):
+        return 2, int(lowered[6:])
+    if lowered.startswith("shift+f"):
+        return 1, int(lowered[7:])
+    if lowered.startswith("f"):
+        return 0, int(lowered[1:])
+    if ":" in lowered:
+        page, slot = lowered.split(":", 1)
+        return int(page), int(slot)
+    raise ValueError(f"expected page:slot, F#, Shift+F#, or Ctrl+F#: {value!r}")
+
+
+def cmd_quickbar_weapons(p, detail_slots=None):
+    parsed_detail_slots = [_parse_quickbar_detail_slot(slot) for slot in (detail_slots or [])]
+    result = quickbar_weapon_info(p, parsed_detail_slots)
+    print(
+        "quickbar-weapons: "
+        f"success={int(result['success'])} supported={int(result.get('supported', False))} "
+        f"count={result.get('count', 0)} err={result.get('last_error', 0)}"
+    )
+    for entry in result.get("entries") or []:
+        if entry.get("slot_type") != 1 and not entry.get("primary_item_id"):
+            continue
+        print(f"page={entry['page']} slot={entry['slot']}: {format_quickbar_weapon_entry(entry)}")
+
 def cmd_chat_poll(p, after, max_lines):
     result = chat_poll(p, after, max_lines)
     print(f"chat-poll: latest_seq={result['latest_seq']} count={len(result['lines'])}")
@@ -678,6 +1030,8 @@ if __name__ == "__main__":
     s11 = sub.add_parser("set-action-mode"); s11.add_argument("mode", type=int, choices=range(0, 13)); s11.add_argument("--off", action="store_true")
     s12 = sub.add_parser("set-combat-mode"); s12.add_argument("mode", type=int, choices=range(0, 13)); s12.add_argument("--off", action="store_true")
     s13 = sub.add_parser("map-pin"); s13.add_argument("x", type=float); s13.add_argument("y", type=float); s13.add_argument("text")
+    quickbar_parser = sub.add_parser("quickbar-weapons")
+    quickbar_parser.add_argument("--detail-slot", action="append", default=[])
     a = ap.parse_args()
 
     p = Pipe(a.pid)
@@ -699,5 +1053,6 @@ if __name__ == "__main__":
         elif a.cmd == "set-action-mode": cmd_set_action_mode(p, a.mode, not a.off)
         elif a.cmd == "set-combat-mode": cmd_set_combat_mode(p, a.mode, not a.off)
         elif a.cmd == "map-pin": cmd_map_pin(p, a.x, a.y, a.text)
+        elif a.cmd == "quickbar-weapons": cmd_quickbar_weapons(p, a.detail_slot)
     finally:
         p.close()

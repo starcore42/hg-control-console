@@ -645,6 +645,14 @@ def query_client(record_or_pid):
         pipe.close()
 
 
+def quickbar_weapons(record_or_pid, detail_slots=None):
+    pipe = open_pipe(record_or_pid)
+    try:
+        return simkeys.quickbar_weapon_info(pipe, detail_slots=detail_slots)
+    finally:
+        pipe.close()
+
+
 def trigger_slot(record_or_pid, slot: int, page: int = 0):
     if slot < 1 or slot > 12:
         raise RuntimeError("slot must be between 1 and 12")

@@ -75,6 +75,27 @@ WEAPON_ELEMENT_MODIFIER_SAMPLE_WINDOW = 100
 WEAPON_ELEMENT_MODIFIER_CLAMP_LOW = 0.80
 WEAPON_ELEMENT_MODIFIER_CLAMP_HIGH = 1.25
 WEAPON_RECENT_SELF_SPELL_DAMAGE_IGNORE_SECONDS = 6.0
+WEAPON_HOOK_DAMAGE_REFRESH_SECONDS = 15.0
+ITEMPROP_DAMAGE_BONUS_PROPERTY = 16
+ITEMPROP_DICE_RE = re.compile(r"^\s*(\d+)d(\d+)\s*$", re.IGNORECASE)
+HOOK_DAMAGE_TYPE_TO_HGX = {
+    0: hgx_data.DAMAGE_TYPE_NAME_TO_ID["bludgeoning"],
+    1: hgx_data.DAMAGE_TYPE_NAME_TO_ID["piercing"],
+    2: hgx_data.DAMAGE_TYPE_NAME_TO_ID["slashing"],
+    3: hgx_data.DAMAGE_TYPE_NAME_TO_ID["subdual"],
+    5: hgx_data.DAMAGE_TYPE_NAME_TO_ID["magical"],
+    6: hgx_data.DAMAGE_TYPE_NAME_TO_ID["acid"],
+    7: hgx_data.DAMAGE_TYPE_NAME_TO_ID["cold"],
+    8: hgx_data.DAMAGE_TYPE_NAME_TO_ID["divine"],
+    9: hgx_data.DAMAGE_TYPE_NAME_TO_ID["electrical"],
+    10: hgx_data.DAMAGE_TYPE_NAME_TO_ID["fire"],
+    11: hgx_data.DAMAGE_TYPE_NAME_TO_ID["negative"],
+    12: hgx_data.DAMAGE_TYPE_NAME_TO_ID["positive"],
+    13: hgx_data.DAMAGE_TYPE_NAME_TO_ID["sonic"],
+    14: hgx_data.DAMAGE_TYPE_NAME_TO_ID["ectoplasmic"],
+    15: hgx_data.DAMAGE_TYPE_NAME_TO_ID["psionic"],
+}
+HOOK_SCORABLE_DAMAGE_TYPES = frozenset(HOOK_DAMAGE_TYPE_TO_HGX.values())
 P2_SPECIAL_NAME = "P2"
 MAMMONS_WRATH_SIGNATURE = tuple(sorted((
     hgx_data.DAMAGE_TYPE_NAME_TO_ID["cold"],
@@ -1054,6 +1075,13 @@ class WeaponLearningProfile:
     target_type_estimates: Dict[str, Dict[int, WeaponDamageEstimate]] = field(default_factory=dict)
     target_damage_observations: Dict[str, Dict[Tuple[int, ...], WeaponObservedDamage]] = field(default_factory=dict)
     type_modifier_samples: Dict[int, List[float]] = field(default_factory=dict)
+    hook_components: Dict[int, float] = field(default_factory=dict)
+    hook_component_labels: Dict[int, List[str]] = field(default_factory=dict)
+    hook_damage_row_count: int = 0
+    hook_ignored_row_count: int = 0
+    hook_last_error: int = 0
+    hook_last_scan_at: float = 0.0
+    hook_detail_requested: bool = False
 
 
 @dataclass(frozen=True)
@@ -1815,6 +1843,7 @@ class AutoAAScript(ClientScriptBase):
     MODE_DIVINE_SLINGER = "Divine Slinger"
     MODE_GNOMISH_INVENTOR = "Gnomish Inventor"
     MODE_WEAPON_SWAP = "Weapon Swap"
+    MODE_WEAPON_SWAP_HOOK = "Weapon Swap (Hook)"
     MODE_SHIFTER_WEAPON_SWAP = "Shifter Weapon Swap"
     MAX_WEAPON_BINDINGS = len(WEAPON_BINDING_KEYS)
     WEAPON_SIGNATURE_CONFIRM_THRESHOLD = 2
@@ -1823,6 +1852,8 @@ class AutoAAScript(ClientScriptBase):
     WEAPON_ACTUAL_DAMAGE_WINDOW = 9
     WEAPON_PENDING_MAX_RETRIES = 2
     WEAPON_EQUIPPED_PROBE_INTERVAL_SECONDS = 0.50
+    WEAPON_QUICKBAR_DETAIL_RETRY_SECONDS = 0.60
+    WEAPON_QUICKBAR_DETAIL_RETRY_ATTEMPTS = 2
     SHIFTER_UNSHIFT_WAIT_SECONDS = 1.50
     SHIFTER_WEAPON_CONFIRM_RETRY_SECONDS = 2.00
     SHIFTER_SHIFT_FIRST_RETRY_SECONDS = 2.00
@@ -1861,6 +1892,9 @@ class AutoAAScript(ClientScriptBase):
         self.slinger_states: Dict[str, SlingerTargetState] = {}
         self.weapon_bindings: Dict[str, WeaponBinding] = {}
         self.weapon_profiles: Dict[str, WeaponLearningProfile] = {}
+        self.weapon_hook_last_refresh_at = 0.0
+        self.weapon_hook_scan_error = ""
+        self.weapon_hook_scan_supported = True
         self.current_weapon_key = ""
         self.pending_weapon_key = ""
         self.pending_weapon_unarm = False
@@ -1935,6 +1969,9 @@ class AutoAAScript(ClientScriptBase):
         self.slinger_states = {}
         self.weapon_bindings = {}
         self.weapon_profiles = {}
+        self.weapon_hook_last_refresh_at = 0.0
+        self.weapon_hook_scan_error = ""
+        self.weapon_hook_scan_supported = True
         self.current_weapon_key = ""
         self.pending_weapon_key = ""
         self.pending_weapon_unarm = False
@@ -1981,6 +2018,7 @@ class AutoAAScript(ClientScriptBase):
                 f"{self.host.client.display_name}: {self._mode_label()} started ({current_label})",
                 script_id=self.script_id,
             )
+            self._emit_weapon_quickbar_diagnostics()
             return
 
         damage_dice = self._damage_dice()
@@ -2010,6 +2048,9 @@ class AutoAAScript(ClientScriptBase):
         self.slinger_states = {}
         self.weapon_bindings = {}
         self.weapon_profiles = {}
+        self.weapon_hook_last_refresh_at = 0.0
+        self.weapon_hook_scan_error = ""
+        self.weapon_hook_scan_supported = True
         self.current_weapon_key = ""
         self.pending_weapon_key = ""
         self.pending_weapon_unarm = False
@@ -2227,13 +2268,21 @@ class AutoAAScript(ClientScriptBase):
             self.MODE_DIVINE_SLINGER,
             self.MODE_GNOMISH_INVENTOR,
             self.MODE_WEAPON_SWAP,
+            self.MODE_WEAPON_SWAP_HOOK,
             self.MODE_SHIFTER_WEAPON_SWAP,
         ):
             return mode
         return self.MODE_ARCANE_ARCHER
 
     def _is_weapon_mode(self) -> bool:
-        return self._mode_label() in (self.MODE_WEAPON_SWAP, self.MODE_SHIFTER_WEAPON_SWAP)
+        return self._mode_label() in (
+            self.MODE_WEAPON_SWAP,
+            self.MODE_WEAPON_SWAP_HOOK,
+            self.MODE_SHIFTER_WEAPON_SWAP,
+        )
+
+    def _is_hook_weapon_mode(self) -> bool:
+        return self._mode_label() == self.MODE_WEAPON_SWAP_HOOK
 
     def _is_shifter_weapon_mode(self) -> bool:
         return self._mode_label() == self.MODE_SHIFTER_WEAPON_SWAP
@@ -2388,6 +2437,301 @@ class AutoAAScript(ClientScriptBase):
                 ),
                 script_id=self.script_id,
             )
+
+    def _weapon_detail_slots(self) -> List[Tuple[int, int]]:
+        detail_slots = []
+        seen_detail_slots = set()
+        for binding_key in self._weapon_binding_keys():
+            binding = self.weapon_bindings.get(binding_key)
+            if binding is None:
+                continue
+            key = (binding.page, binding.slot)
+            if key in seen_detail_slots:
+                continue
+            seen_detail_slots.add(key)
+            detail_slots.append(key)
+        return detail_slots
+
+    def _quickbar_weapon_entries_by_slot(self, scan_result: dict) -> Dict[Tuple[int, int], dict]:
+        by_slot = scan_result.get("entries_by_slot") or {}
+        if not by_slot:
+            entries = scan_result.get("entries") or []
+            by_slot = {(entry.get("page"), entry.get("slot")): entry for entry in entries}
+        return by_slot
+
+    def _binding_entries_need_retry(self, by_slot: Dict[Tuple[int, int], dict]) -> bool:
+        for binding_key in self._weapon_binding_keys():
+            binding = self.weapon_bindings.get(binding_key)
+            if binding is None:
+                continue
+            entry = by_slot.get((binding.page, binding.slot))
+            if not entry:
+                continue
+            if entry.get("damage_rows"):
+                continue
+            if entry.get("primary_detail_requested", 0) or entry.get("secondary_detail_requested", 0):
+                return True
+        return False
+
+    def _query_quickbar_weapon_scan(self) -> Tuple[dict, Dict[Tuple[int, int], dict]]:
+        detail_slots = self._weapon_detail_slots()
+        result = self.host.quickbar_weapons(detail_slots=detail_slots)
+        for _ in range(self.WEAPON_QUICKBAR_DETAIL_RETRY_ATTEMPTS):
+            if not result.get("supported", True) or not result.get("success", False):
+                break
+            by_slot = self._quickbar_weapon_entries_by_slot(result)
+            if not self._binding_entries_need_retry(by_slot):
+                return result, by_slot
+            time.sleep(self.WEAPON_QUICKBAR_DETAIL_RETRY_SECONDS)
+            result = self.host.quickbar_weapons(detail_slots=detail_slots)
+        return result, self._quickbar_weapon_entries_by_slot(result)
+
+    def _hook_damage_cost_expected_value(self, cost_value: int) -> Tuple[float, str]:
+        label = str(simkeys.ITEMPROP_DAMAGE_COST_LABELS.get(int(cost_value or 0), "") or "").strip()
+        if not label:
+            return 0.0, f"cost={int(cost_value or 0)}"
+
+        match = ITEMPROP_DICE_RE.match(label)
+        if match:
+            dice_count = max(int(match.group(1)), 0)
+            die_size = max(int(match.group(2)), 0)
+            if dice_count > 0 and die_size > 0:
+                return float(dice_count) * (float(die_size) + 1.0) / 2.0, label
+
+        try:
+            flat_value = float(label)
+        except ValueError:
+            return 0.0, label
+        return max(flat_value, 0.0), label
+
+    def _hook_damage_row_component(self, row: dict) -> Optional[Tuple[int, float, str]]:
+        if int(row.get("property_name") or 0) != ITEMPROP_DAMAGE_BONUS_PROPERTY:
+            return None
+
+        hook_damage_type = int(row.get("subtype") or 0)
+        damage_type = HOOK_DAMAGE_TYPE_TO_HGX.get(hook_damage_type)
+        if damage_type is None:
+            return None
+
+        base_damage, label = self._hook_damage_cost_expected_value(int(row.get("cost_value") or 0))
+        if base_damage <= 0.0:
+            return None
+        return damage_type, base_damage, label
+
+    def _format_hook_component_labels(self, profile: WeaponLearningProfile) -> str:
+        if profile is None or not profile.hook_component_labels:
+            return ""
+
+        parts = []
+        for damage_type in sorted(profile.hook_component_labels):
+            labels = [label for label in profile.hook_component_labels.get(damage_type, []) if label]
+            if labels:
+                parts.append(f"{_format_damage_type_label(damage_type)} {'+'.join(labels)}")
+        return "/".join(parts)
+
+    def _apply_hook_weapon_entry_to_profile(self, profile: WeaponLearningProfile, entry: Optional[dict]):
+        components: Dict[int, float] = {}
+        component_labels: Dict[int, List[str]] = {}
+        row_count = 0
+        ignored_count = 0
+        last_error = 0
+        detail_requested = False
+
+        if entry:
+            last_error = int(entry.get("error") or 0)
+            detail_requested = bool(
+                entry.get("primary_detail_requested", 0)
+                or entry.get("secondary_detail_requested", 0)
+            )
+            for row in entry.get("damage_rows") or []:
+                row_count += 1
+                component = self._hook_damage_row_component(row)
+                if component is None:
+                    ignored_count += 1
+                    continue
+                damage_type, base_damage, label = component
+                if float(base_damage) > float(components.get(damage_type, 0.0)):
+                    components[damage_type] = float(base_damage)
+                    component_labels[damage_type] = [label]
+
+        profile.hook_components = components
+        profile.hook_component_labels = component_labels
+        profile.hook_damage_row_count = row_count
+        profile.hook_ignored_row_count = ignored_count
+        profile.hook_last_error = last_error
+        profile.hook_last_scan_at = time.monotonic()
+        profile.hook_detail_requested = detail_requested
+
+        signature = tuple(sorted(
+            damage_type for damage_type in components
+            if damage_type in HOOK_SCORABLE_DAMAGE_TYPES
+        ))
+        profile.stable_signature = signature
+        profile.current_signature = signature
+        profile.candidate_signature = ()
+        profile.candidate_signature_streak = 0
+        profile.stable_signature_observations = row_count if components else 0
+        profile.observations = 1 if components else 0
+        profile.attack_attempts = 0
+        profile.dynamic_kind = ""
+        profile.type_counts = {damage_type: 1 for damage_type in components}
+        profile.type_estimates.clear()
+        profile.target_type_estimates.clear()
+        profile.target_damage_observations.clear()
+        profile.type_modifier_samples.clear()
+
+    def _apply_hook_weapon_scan_result(self, by_slot: Dict[Tuple[int, int], dict]):
+        if not self._is_hook_weapon_mode():
+            return
+
+        for binding_key, profile in self.weapon_profiles.items():
+            binding = self.weapon_bindings.get(binding_key)
+            entry = by_slot.get((binding.page, binding.slot)) if binding is not None else None
+            self._apply_hook_weapon_entry_to_profile(profile, entry)
+
+    def _refresh_hook_weapon_damage_profiles(self, force: bool = False, emit: bool = False) -> bool:
+        if not self._is_hook_weapon_mode() or not self.weapon_bindings:
+            return False
+
+        now = time.monotonic()
+        if (
+            not force
+            and self.weapon_hook_last_refresh_at > 0.0
+            and now - self.weapon_hook_last_refresh_at < WEAPON_HOOK_DAMAGE_REFRESH_SECONDS
+        ):
+            return False
+
+        try:
+            result, by_slot = self._query_quickbar_weapon_scan()
+        except Exception as exc:
+            error_text = str(exc)
+            if emit or error_text != self.weapon_hook_scan_error:
+                self.host.emit(
+                    "info",
+                    f"{self.host.client.display_name}: {self._mode_label()} hook weapon scan unavailable: {exc}",
+                    script_id=self.script_id,
+                )
+            self.weapon_hook_scan_error = error_text
+            return False
+
+        self.weapon_hook_last_refresh_at = time.monotonic()
+        self.weapon_hook_scan_supported = bool(result.get("supported", True))
+        if not self.weapon_hook_scan_supported:
+            self.weapon_hook_scan_error = f"unsupported err={result.get('last_error', 0)}"
+            if emit:
+                self.host.emit(
+                    "info",
+                    (
+                        f"{self.host.client.display_name}: {self._mode_label()} hook weapon scan unsupported "
+                        f"(err={result.get('last_error', 0)})"
+                    ),
+                    script_id=self.script_id,
+                )
+            return False
+
+        if not result.get("success", False):
+            self.weapon_hook_scan_error = f"err={result.get('last_error', 0)}"
+            if emit:
+                self.host.emit(
+                    "info",
+                    (
+                        f"{self.host.client.display_name}: {self._mode_label()} hook weapon scan reported "
+                        f"err={result.get('last_error', 0)}"
+                    ),
+                    script_id=self.script_id,
+                )
+        else:
+            self.weapon_hook_scan_error = ""
+
+        self._apply_hook_weapon_scan_result(by_slot)
+        if emit:
+            for binding_key in self._weapon_binding_keys():
+                profile = self.weapon_profiles.get(binding_key)
+                if profile is None:
+                    continue
+                summary = self._weapon_runtime_summary(profile)
+                self.host.emit(
+                    "info",
+                    (
+                        f"{self.host.client.display_name}: {self._mode_label()} hook model "
+                        f"{self._binding_display(binding_key)}: {summary}"
+                    ),
+                    script_id=self.script_id,
+                )
+        self.host.notify_state_changed()
+        return True
+
+    def _emit_weapon_quickbar_diagnostics(self):
+        if not self._is_weapon_mode():
+            return
+
+        try:
+            result, by_slot = self._query_quickbar_weapon_scan()
+        except Exception as exc:
+            self.host.emit(
+                "info",
+                f"{self.host.client.display_name}: {self._mode_label()} quickbar weapon scan unavailable: {exc}",
+                script_id=self.script_id,
+            )
+            return
+
+        if not result.get("supported", True):
+            if self._is_hook_weapon_mode():
+                self.weapon_hook_scan_supported = False
+                self.weapon_hook_scan_error = f"unsupported err={result.get('last_error', 0)}"
+            self.host.emit(
+                "info",
+                (
+                    f"{self.host.client.display_name}: {self._mode_label()} quickbar weapon scan unsupported "
+                    f"(err={result.get('last_error', 0)})"
+                ),
+                script_id=self.script_id,
+            )
+            return
+
+        if not result.get("success", False):
+            if self._is_hook_weapon_mode():
+                self.weapon_hook_scan_error = f"err={result.get('last_error', 0)}"
+            self.host.emit(
+                "info",
+                (
+                    f"{self.host.client.display_name}: {self._mode_label()} quickbar weapon scan reported "
+                    f"err={result.get('last_error', 0)}"
+                ),
+                script_id=self.script_id,
+            )
+
+        if self._is_hook_weapon_mode():
+            self.weapon_hook_last_refresh_at = time.monotonic()
+            self.weapon_hook_scan_supported = bool(result.get("supported", True))
+            self.weapon_hook_scan_error = "" if result.get("success", False) else f"err={result.get('last_error', 0)}"
+            self._apply_hook_weapon_scan_result(by_slot)
+
+        for binding_key in self._weapon_binding_keys():
+            binding = self.weapon_bindings.get(binding_key)
+            if binding is None:
+                continue
+            entry = by_slot.get((binding.page, binding.slot))
+            detail = simkeys.format_quickbar_weapon_entry(entry)
+            self.host.emit(
+                "info",
+                (
+                    f"{self.host.client.display_name}: {self._mode_label()} quickbar "
+                    f"{self._binding_display(binding_key)}: {detail}"
+                ),
+                script_id=self.script_id,
+            )
+            if self._is_hook_weapon_mode():
+                profile = self.weapon_profiles.get(binding_key)
+                if profile is not None:
+                    self.host.emit(
+                        "info",
+                        (
+                            f"{self.host.client.display_name}: {self._mode_label()} hook model "
+                            f"{self._binding_display(binding_key)}: {self._weapon_runtime_summary(profile)}"
+                        ),
+                        script_id=self.script_id,
+                    )
 
     def _binding_display(self, binding_key: str) -> str:
         if binding_key == WEAPON_CURRENT_UNKNOWN:
@@ -3000,7 +3344,8 @@ class AutoAAScript(ClientScriptBase):
     def _damage_signature(self, observed_types: Set[int]) -> Tuple[int, ...]:
         if not observed_types:
             return ()
-        return tuple(sorted(damage_type for damage_type in observed_types if damage_type in WEAPON_SIGNATURE_TYPES))
+        signature_types = HOOK_SCORABLE_DAMAGE_TYPES if self._is_hook_weapon_mode() else WEAPON_SIGNATURE_TYPES
+        return tuple(sorted(damage_type for damage_type in observed_types if damage_type in signature_types))
 
     def _is_p2_signature(self, signature: Tuple[int, ...]) -> bool:
         signature_types = {int(damage_type) for damage_type in signature if isinstance(damage_type, int)}
@@ -3095,10 +3440,19 @@ class AutoAAScript(ClientScriptBase):
         profile.target_type_estimates.clear()
         profile.target_damage_observations.clear()
         profile.type_modifier_samples.clear()
+        profile.hook_components.clear()
+        profile.hook_component_labels.clear()
+        profile.hook_damage_row_count = 0
+        profile.hook_ignored_row_count = 0
+        profile.hook_last_error = 0
+        profile.hook_last_scan_at = 0.0
+        profile.hook_detail_requested = False
 
     def _profile_signature_types(self, profile: Optional[WeaponLearningProfile]) -> Set[int]:
         if profile is None:
             return set()
+        if self._is_hook_weapon_mode():
+            return set(profile.stable_signature)
         if self._profile_is_p2(profile) and profile.current_signature:
             return set(profile.current_signature)
         return set(profile.stable_signature)
@@ -3106,6 +3460,8 @@ class AutoAAScript(ClientScriptBase):
     def _profile_known_damage_types(self, profile: Optional[WeaponLearningProfile]) -> Set[int]:
         if profile is None:
             return set()
+        if self._is_hook_weapon_mode() and profile.hook_components:
+            return set(profile.hook_components.keys())
         if not self._profile_is_p2(profile):
             if profile.stable_signature:
                 return set(profile.stable_signature)
@@ -3568,6 +3924,8 @@ class AutoAAScript(ClientScriptBase):
     def _profile_component_estimates(self, profile: Optional[WeaponLearningProfile]) -> Dict[int, float]:
         if profile is None:
             return {}
+        if self._is_hook_weapon_mode():
+            return dict(profile.hook_components)
 
         return self._profile_model_components_for_types(profile, self._profile_known_damage_types(profile))
 
@@ -3672,6 +4030,8 @@ class AutoAAScript(ClientScriptBase):
     def _profile_learning_complete(self, profile: Optional[WeaponLearningProfile]) -> bool:
         if profile is None:
             return False
+        if self._is_hook_weapon_mode():
+            return bool(profile.hook_components)
         has_signature_state = bool(profile.stable_signature) or self._profile_is_p2(profile)
         return has_signature_state and self._profile_p2_verification_complete(profile)
 
@@ -3700,7 +4060,20 @@ class AutoAAScript(ClientScriptBase):
         special_name = self._special_weapon_name_for_profile(profile)
         if special_name:
             parts.append(special_name)
-        if self._profile_is_p2(profile):
+        if self._is_hook_weapon_mode():
+            if profile.hook_components:
+                parts.append("Hook")
+                parts.append("Types " + self._format_weapon_type_set(set(profile.hook_components.keys())))
+                dice_text = self._format_hook_component_labels(profile)
+                if dice_text:
+                    parts.append("Dice " + dice_text)
+            else:
+                parts.append("Hook Missing")
+                if profile.hook_detail_requested:
+                    parts.append("detail pending")
+                if profile.hook_last_error:
+                    parts.append(f"err {profile.hook_last_error}")
+        elif self._profile_is_p2(profile):
             if profile.current_signature:
                 parts.append("Current " + self._format_weapon_type_set(set(profile.current_signature)))
             else:
@@ -3747,13 +4120,15 @@ class AutoAAScript(ClientScriptBase):
         ignored_types = self._weapon_ignored_damage_types(profile, components)
         if ignored_types:
             parts.append(f"Ignore {self._format_ignored_damage_types(profile, ignored_types)} rider")
-        if self._profile_learning_complete(profile):
+        if self._is_hook_weapon_mode() and profile.hook_components:
+            parts.append("Hook Ready")
+        elif self._profile_learning_complete(profile):
             parts.append("Learning Complete")
         elif self._profile_requires_p2_verification(profile):
             verified = min(len(profile.p2_verification_targets), 2)
             parts.append(f"P2 check {verified}/2")
 
-        suffix = f"obs {profile.observations}, attacks {profile.attack_attempts}"
+        suffix = f"rows {profile.hook_damage_row_count}" if self._is_hook_weapon_mode() else f"obs {profile.observations}, attacks {profile.attack_attempts}"
         if self._profile_is_p2(profile):
             suffix += ", adaptive"
         if profile.stable_signature_observations:
@@ -3762,6 +4137,8 @@ class AutoAAScript(ClientScriptBase):
             suffix += f", mismatch {profile.mismatch_streak}/{self.WEAPON_REDISCOVERY_MISMATCH_THRESHOLD}"
         if profile.rediscoveries:
             suffix += f", rediscovered {profile.rediscoveries}"
+        if self._is_hook_weapon_mode() and profile.hook_ignored_row_count:
+            suffix += f", ignored {profile.hook_ignored_row_count}"
         parts.append(suffix)
         return ", ".join(part for part in parts if part)
 
@@ -4019,8 +4396,9 @@ class AutoAAScript(ClientScriptBase):
 
     def _observed_weapon_damage_types(self, damage_line) -> Set[int]:
         observed_types: Set[int] = set()
+        allowed_types = HOOK_SCORABLE_DAMAGE_TYPES if self._is_hook_weapon_mode() else WEAPON_SIGNATURE_TYPES
         for component in damage_line.components:
-            if component.damage_type in WEAPON_SIGNATURE_TYPES:
+            if component.damage_type in allowed_types:
                 observed_types.add(component.damage_type)
         return observed_types
 
@@ -4583,6 +4961,9 @@ class AutoAAScript(ClientScriptBase):
         if profile is None:
             self._shift_away_from_observed_healing_damage(None, damage_line)
             return
+        if self._is_hook_weapon_mode():
+            self._shift_away_from_observed_healing_damage(profile, damage_line)
+            return
 
         applied, signature_changed, new_types, new_estimates = self._apply_weapon_profile_observation(
             profile,
@@ -4878,6 +5259,9 @@ class AutoAAScript(ClientScriptBase):
         )
 
     def _weapon_candidates_for_target(self, creature_name: str) -> List[WeaponRecommendation]:
+        if self._is_hook_weapon_mode():
+            self._refresh_hook_weapon_damage_profiles(force=False)
+
         candidates: List[WeaponRecommendation] = []
         for profile in self.weapon_profiles.values():
             if self._profile_is_p2(profile):
@@ -5039,11 +5423,21 @@ class AutoAAScript(ClientScriptBase):
         for profile in self.weapon_profiles.values():
             if self._profile_learning_complete(profile):
                 ready_count += 1
-            if profile.type_estimates or profile.type_modifier_samples:
+            if (
+                (self._is_hook_weapon_mode() and profile.hook_components)
+                or profile.type_estimates
+                or profile.type_modifier_samples
+            ):
                 estimated_count += 1
             if self._profile_is_p2(profile):
                 adaptive_count += 1
         adaptive_suffix = f", {adaptive_count} adaptive" if adaptive_count else ""
+        if self._is_hook_weapon_mode():
+            error_suffix = f", {self.weapon_hook_scan_error}" if self.weapon_hook_scan_error else ""
+            return (
+                f"{target_name}: hook weapon data "
+                f"({ready_count}/{len(self.weapon_profiles)} ready, {estimated_count} with dice{error_suffix})"
+            )
         return (
             f"{target_name}: learning weapons "
             f"({ready_count}/{len(self.weapon_profiles)} ready, {estimated_count} with estimates{adaptive_suffix})"
@@ -5054,6 +5448,8 @@ class AutoAAScript(ClientScriptBase):
 
     def _next_weapon_to_learn(self, target_name: str) -> Optional[WeaponLearningProfile]:
         if not self.weapon_profiles or not target_name:
+            return None
+        if self._is_hook_weapon_mode():
             return None
 
         current_profile = self.weapon_profiles.get(self.current_weapon_key)
@@ -5761,9 +6157,14 @@ class AutoAAScript(ClientScriptBase):
                 "mismatch_streak": profile.mismatch_streak,
                 "rediscoveries": profile.rediscoveries,
                 "summary": self._weapon_runtime_summary(profile),
+                "hook_ready": bool(profile.hook_components),
+                "hook_rows": profile.hook_damage_row_count,
             })
         return {
             "weapon_mode": True,
+            "weapon_hook_mode": self._is_hook_weapon_mode(),
+            "weapon_hook_scan_error": self.weapon_hook_scan_error,
+            "weapon_hook_scan_supported": self.weapon_hook_scan_supported,
             "current_weapon": self.current_weapon_key,
             "current_display": (
                 f"{self._binding_display(self.current_weapon_key)} (external swap)"
@@ -9050,6 +9451,9 @@ class ClientScriptHost:
     def query_state(self) -> dict:
         return runtime.query_client(self.client)
 
+    def quickbar_weapons(self, detail_slots=None) -> dict:
+        return runtime.quickbar_weapons(self.client, detail_slots=detail_slots)
+
     def format_slot(self, page: int, slot: int) -> str:
         if page <= 0:
             return f"F{slot}"
@@ -9475,6 +9879,7 @@ class ScriptManager:
                         AutoAAScript.MODE_DIVINE_SLINGER,
                         AutoAAScript.MODE_GNOMISH_INVENTOR,
                         AutoAAScript.MODE_WEAPON_SWAP,
+                        AutoAAScript.MODE_WEAPON_SWAP_HOOK,
                         AutoAAScript.MODE_SHIFTER_WEAPON_SWAP,
                     ],
                     width=20,

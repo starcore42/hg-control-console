@@ -186,7 +186,11 @@ SCRIPT_ICON_LABELS = dict(OVERLAY_SCRIPT_CONTROLS)
 BANK_PAGE_TO_VALUE = {"None": 0, "Shift": 1, "Control": 2}
 BANK_VALUE_TO_PAGE = {value: label for label, value in BANK_PAGE_TO_VALUE.items()}
 WEAPON_SLOT_RENDER_ORDER = [choice for choice in WEAPON_BASE_SLOT_CHOICES if choice != WEAPON_SLOT_NONE]
-AUTO_DAMAGE_WEAPON_MODES = (AutoAAScript.MODE_WEAPON_SWAP, AutoAAScript.MODE_SHIFTER_WEAPON_SWAP)
+AUTO_DAMAGE_WEAPON_MODES = (
+    AutoAAScript.MODE_WEAPON_SWAP,
+    AutoAAScript.MODE_WEAPON_SWAP_HOOK,
+    AutoAAScript.MODE_SHIFTER_WEAPON_SWAP,
+)
 SCRIPT_CONFIG_SOURCE_DEFAULT = "default"
 SCRIPT_CONFIG_SOURCE_CHARACTER = "character"
 SCRIPT_CONFIG_SOURCE_MANUAL = "manual"
@@ -1042,6 +1046,7 @@ class ScriptCard:
         mode = str(self.vars["mode"][1].get()).strip()
         is_weapon = mode in AUTO_DAMAGE_WEAPON_MODES
         is_shifter = mode == AutoAAScript.MODE_SHIFTER_WEAPON_SWAP
+        is_hook = mode == AutoAAScript.MODE_WEAPON_SWAP_HOOK
         is_gi = mode == AutoAAScript.MODE_GNOMISH_INVENTOR
 
         if is_weapon:
@@ -1053,6 +1058,15 @@ class ScriptCard:
                 )
                 self.weapon_limit_var.set(
                     "Shifter flow: lock the current target, !cancel poly, wait for Player Hide, swap the weapon, then retry the shift slot once per second until the form is confirmed. Enable Heal Only to ignore damage gain and keep the old healing-only behavior."
+                )
+            elif is_hook:
+                self.mode_hint_var.set(
+                    f"{mode} swaps weapons by quickbar and scores each configured weapon from hook-read item damage properties, including active temporary damage rows. "
+                    f"Select up to {max_bindings} weapon buttons. The starting weapon is assumed Unknown and reconciled from the quickbar equipped mask."
+                )
+                self.weapon_limit_var.set(
+                    "Hook scoring uses each weapon's damage dice as average base damage before target immunity and resistance. "
+                    "The script keeps the current weapon unless another clears the configured Gain % margin."
                 )
             else:
                 self.mode_hint_var.set(

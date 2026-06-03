@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdarg.h>
+#include <ctype.h>
 
 #if defined(_M_IX86)
 #pragma comment(linker, "/EXPORT:InitSimKeys=_InitSimKeys@4")
@@ -32,6 +33,7 @@ constexpr UINT kOpMoveToLocation = 3012;
 constexpr UINT kOpSetWalkBypass = 3013;
 constexpr UINT kOpSetActionMode = 3014;
 constexpr UINT kOpMapPin = 3015;
+constexpr UINT kOpQuickbarWeapons = 3016;
 
 constexpr UINT kMsgTriggerVk = WM_APP + 0x491;
 constexpr UINT kMsgSendChat = WM_APP + 0x492;
@@ -60,10 +62,23 @@ constexpr UINT kExpectedQuickbarSlotDispatch = 0x005164A0;
 constexpr UINT kExpectedQuickbarVtable = 0x008AB6D0;
 constexpr UINT kExpectedObjectByIdResolver = 0x004078C0;
 constexpr UINT kExpectedItemEquippedOwnerResolver = 0x004E9B50;
+constexpr UINT kExpectedItemDescriptionBuilder = 0x004074C0;
+constexpr UINT kExpectedItemInfoPopupBranch = 0x004556B4;
+constexpr UINT kExpectedItemInfoPopupBranchReturn = 0x004556BF;
+constexpr UINT kExpectedItemInfoParser = 0x00451680;
+constexpr UINT kExpectedItemInfoPropertyRowAppend = 0x0055EC30;
+constexpr UINT kExpectedItemInfoPropertyRowCall = 0x0046715A;
+constexpr UINT kExpectedItemInfoMessageHandler = 0x00466F00;
+constexpr UINT kExpectedItemInfoMessageHandlerCall = 0x00452A94;
+constexpr UINT kExpectedItemInfoPanelManager = 0x00931678;
+constexpr UINT kExpectedItemDetailRequest = 0x004B01D0;
+constexpr UINT kExpectedNwnStringInit = 0x004F85A0;
+constexpr UINT kExpectedGuiSetVisible = 0x005E4650;
 constexpr UINT kExpectedChatSend = 0x0057C9F0;
 constexpr UINT kExpectedChatWindowLog = 0x00493BD0;
 constexpr UINT kExpectedAppObjectResolver = 0x00405160;
 constexpr UINT kExpectedClientGuiMessageResolver = 0x00407B70;
+constexpr UINT kExpectedItemMessageResolver = 0x00407C80;
 constexpr UINT kExpectedCurrentPlayerResolver = 0x00407850;
 constexpr UINT kExpectedPlayerNameBuilder = 0x004CEF20;
 constexpr UINT kExpectedNwnStringConstructFromCString = 0x005BA260;
@@ -91,6 +106,29 @@ constexpr uint32_t kInvalidObjectId = 0x7F000000u;
 constexpr BYTE kQuickbarItemSlotType = 1;
 constexpr int kQuickbarPageCount = 3;
 constexpr int kQuickbarSlotCount = 12;
+constexpr int kQuickbarWeaponEntryCount = kQuickbarPageCount * kQuickbarSlotCount;
+constexpr int kQuickbarWeaponDamageTypeCount = 16;
+constexpr int kQuickbarWeaponMaxDamageRows = 16;
+constexpr int kQuickbarWeaponDescriptionCapacity = 8192;
+constexpr int kItemPropertyMaxRows = 256;
+constexpr int kQuickbarWeaponDetailBackscanBytes = 160;
+constexpr int kQuickbarWeaponDetailMaxUniqueItems = kQuickbarWeaponEntryCount * 2;
+constexpr int kQuickbarWeaponDetailCacheCapacity = kQuickbarWeaponEntryCount * 2;
+constexpr int kQuickbarWeaponDetailList = 3;
+constexpr DWORD kQuickbarWeaponDetailPendingTimeoutMs = 60000u;
+constexpr uintptr_t kQuickbarWeaponDetailNearbyBytes = 0x01000000u;
+constexpr uintptr_t kQuickbarWeaponDetailAppNearbyBytes = 0x04000000u;
+constexpr int kQuietItemInfoParserNotHandled = static_cast<int>(0x80000000u);
+constexpr uint32_t kClientItemDetailObjectMarker = 0xFFFFFFF7u;
+constexpr uint32_t kClientItemQuickbarObjectMarker = 0x00FF00FFu;
+constexpr uint32_t kClientItemActivePropertyCountOffset = 0x11Cu;
+constexpr uint32_t kClientItemActivePropertyDataOffset = 0x120u;
+constexpr uint32_t kClientItemPropertyStride = 0x14u;
+constexpr uint32_t kItemInfoPanelItemIdOffset = 0x2CCu;
+constexpr uint16_t kItemPropertyDamageBonus = 16;
+constexpr uint16_t kItemPropertyDamageBonusVsAlignmentGroup = 17;
+constexpr uint16_t kItemPropertyDamageBonusVsRacialGroup = 18;
+constexpr uint16_t kItemPropertyDamageBonusVsSpecificAlignment = 19;
 constexpr int kActionModeDefensiveCast = 10;
 constexpr int kPendingChatCapacity = 1024;
 constexpr int kMapPinTextCapacity = 512;
@@ -214,6 +252,77 @@ struct MapPinResponse {
   int32_t success;
   int32_t rc;
   int32_t last_error;
+};
+
+struct QuickbarWeaponPropertyRow {
+  int32_t hand;
+  int32_t list;
+  int32_t property_name;
+  int32_t subtype;
+  int32_t cost_table;
+  int32_t cost_value;
+  int32_t param1;
+  int32_t param1_value;
+};
+
+struct QuickbarWeaponInfoEntry {
+  int32_t page;
+  int32_t slot;
+  int32_t bit_index;
+  int32_t slot_type;
+  uint32_t slot_ptr;
+  uint32_t primary_item_id;
+  uint32_t secondary_item_id;
+  uint32_t primary_item_ptr;
+  uint32_t secondary_item_ptr;
+  int32_t primary_equipped;
+  int32_t secondary_equipped;
+  int32_t primary_active_property_count;
+  int32_t primary_passive_property_count;
+  int32_t secondary_active_property_count;
+  int32_t secondary_passive_property_count;
+  int32_t primary_detail_requested;
+  int32_t secondary_detail_requested;
+  int32_t damage_row_count;
+  uint32_t primary_damage_mask;
+  uint32_t secondary_damage_mask;
+  int32_t primary_damage_amounts[kQuickbarWeaponDamageTypeCount];
+  int32_t secondary_damage_amounts[kQuickbarWeaponDamageTypeCount];
+  int32_t error;
+  QuickbarWeaponPropertyRow damage_rows[kQuickbarWeaponMaxDamageRows];
+};
+
+struct QuickbarWeaponInfoResponse {
+  int32_t success;
+  int32_t count;
+  int32_t last_error;
+  QuickbarWeaponInfoEntry entries[kQuickbarWeaponEntryCount];
+};
+
+struct QuickbarWeaponInfoRequest {
+  uint32_t detail_slot_mask_low;
+  uint32_t detail_slot_mask_high;
+};
+
+static_assert(sizeof(QuickbarWeaponPropertyRow) == 32, "quickbar weapon row pipe ABI changed");
+static_assert(sizeof(QuickbarWeaponInfoEntry) == 724, "quickbar weapon entry pipe ABI changed");
+static_assert(sizeof(QuickbarWeaponInfoRequest) == 8, "quickbar weapon request pipe ABI changed");
+
+struct QuickbarWeaponDetailScanResult {
+  uint32_t item_id;
+  int32_t found;
+  int32_t row_count;
+  QuickbarWeaponPropertyRow rows[kQuickbarWeaponMaxDamageRows];
+};
+
+struct QuickbarWeaponDetailCacheEntry {
+  uint32_t item_id;
+  int32_t pending;
+  int32_t valid;
+  int32_t row_count;
+  DWORD last_error;
+  DWORD pending_since;
+  QuickbarWeaponPropertyRow rows[kQuickbarWeaponMaxDamageRows];
 };
 
 struct MoveToLocationRequest {
@@ -439,6 +548,7 @@ struct SimKeysState {
   volatile LONG quickbar_trace_installed;
   volatile LONG quickbar_slot_trace_installed;
   volatile LONG chat_trace_installed;
+  volatile LONG item_info_parser_hook_installed;
   volatile LONG overlay_hook_installed;
   volatile LONG overlay_count;
   volatile LONG overlay_draws;
@@ -461,17 +571,33 @@ struct SimKeysState {
   volatile LONG quickbar_item_mask_high;
   volatile LONG quickbar_equipped_mask_low;
   volatile LONG quickbar_equipped_mask_high;
+  volatile LONG quickbar_weapon_count;
+  volatile LONG quickbar_weapon_error;
+  volatile LONG quickbar_weapon_refresh_requested;
+  volatile LONG quickbar_weapon_detail_slot_mask_low;
+  volatile LONG quickbar_weapon_detail_slot_mask_high;
+  volatile LONG quickbar_weapon_detail_pending_count;
+  volatile LONG quickbar_weapon_detail_cache_hits;
   volatile LONG log_level;
   volatile LONG player_object;
   volatile LONG player_creature;
   volatile LONG identity_refresh_count;
   volatile LONG identity_error;
   volatile LONG walk_no_walk_bypass_enabled;
+  volatile LONG key_message_count;
+  volatile LONG key_down_count;
+  volatile LONG key_up_count;
+  volatile LONG last_key_message;
+  volatile LONG last_key_wparam;
+  volatile LONG last_key_lparam;
   volatile LONG last_vk;
   volatile LONG last_result;
   volatile LONG last_error;
   ChatLineEntry chat_lines[kChatQueueCapacity];
   OverlayRecord overlays[kMaxOverlays];
+  QuickbarWeaponInfoEntry quickbar_weapon_work[kQuickbarWeaponEntryCount];
+  QuickbarWeaponDetailScanResult quickbar_weapon_detail_results[kQuickbarWeaponDetailMaxUniqueItems];
+  QuickbarWeaponInfoEntry quickbar_weapons[kQuickbarWeaponEntryCount];
 };
 
 SimKeysState g_state = {};
@@ -485,11 +611,28 @@ size_t g_quickbar_slot_stolen = 0;
 BYTE g_chat_log_original[32] = {};
 void* g_chat_log_gateway = nullptr;
 size_t g_chat_log_stolen = 0;
+BYTE g_item_info_parser_original[16] = {};
+void* g_item_info_parser_gateway = nullptr;
+size_t g_item_info_parser_stolen = 0;
+BYTE g_item_info_property_row_original[16] = {};
+void* g_item_info_property_row_gateway = nullptr;
+size_t g_item_info_property_row_stolen = 0;
+BYTE g_item_info_message_handler_original[8] = {};
+void* g_item_info_message_handler_gateway = nullptr;
+size_t g_item_info_message_handler_stolen = 0;
+uint32_t g_item_info_message_handler_return_address = 0;
 BYTE g_wgl_swap_original[8] = {};
 void* g_wgl_swap_gateway = nullptr;
 size_t g_wgl_swap_stolen = 0;
+BYTE g_item_info_popup_original[16] = {};
+size_t g_item_info_popup_stolen = 0;
+uint32_t g_item_info_parser_address = 0;
+uint32_t g_item_info_popup_return_address = 0;
 BYTE g_walk_no_walk_original[5] = {};
 bool g_walk_no_walk_bypass_installed = false;
+CRITICAL_SECTION g_quickbar_weapon_detail_lock = {};
+bool g_quickbar_weapon_detail_lock_ready = false;
+QuickbarWeaponDetailCacheEntry g_quickbar_weapon_detail_cache[kQuickbarWeaponDetailCacheCapacity] = {};
 
 typedef BOOL (WINAPI* WglSwapLayerBuffersFn)(HDC hdc, UINT planes);
 typedef void (APIENTRY* GlDisableFn)(UINT cap);
@@ -529,10 +672,27 @@ void* MakeJmpGateway(BYTE* target, size_t stolen);
 BOOL DiscoverQuickbarPanelByScan(const char* reason);
 BOOL InstallChatWindowLogHook();
 BOOL InstallOverlayHook();
+BOOL InstallItemInfoParserHook();
+BOOL InstallItemInfoPopupHook();
+BOOL InstallItemInfoPropertyRowHook();
+BOOL InstallItemInfoMessageHandlerHook();
+BOOL UninstallItemInfoPropertyRowHook();
+BOOL UninstallItemInfoMessageHandlerHook();
+BOOL EnsureQuickbarWeaponDetailHooksInstalled();
+void MaybeUninstallQuickbarWeaponDetailHooks();
 BOOL RefreshCharacterIdentity(DWORD* out_error);
 BOOL SetWalkNoWalkBypassEnabledOnWindowThread(BOOL enabled);
 BOOL SetActionModeOnWindowThread(LONG mode, BOOL enabled, LONG* out_active, DWORD* out_error);
+bool IsReadableWritableProtection(DWORD protect);
 void UpdateQuickbarItemMasksOnWindowThread();
+void UpdateQuickbarWeaponInfoOnWindowThread();
+#if defined(_M_IX86)
+extern "C" void ItemInfoParserEntryHook();
+extern "C" void ItemInfoPopupBranchHook();
+extern "C" void ItemInfoPropertyRowAppendHook();
+extern "C" void ItemInfoMessageHandlerCallHook();
+extern "C" void ItemInfoMessageHandlerAfterOriginal();
+#endif
 
 uintptr_t GetProcessImageBase() {
   return reinterpret_cast<uintptr_t>(GetModuleHandleA(nullptr));
@@ -926,6 +1086,1658 @@ void UpdateQuickbarItemMasksOnWindowThread() {
       item_low,
       equipped_high,
       equipped_low);
+}
+
+void InitializeQuickbarWeaponInfoEntry(QuickbarWeaponInfoEntry* entry, int page, int slot_index) {
+  if (entry == nullptr) {
+    return;
+  }
+
+  ZeroMemory(entry, sizeof(*entry));
+  entry->page = page;
+  entry->slot = slot_index + 1;
+  entry->bit_index = page * kQuickbarSlotCount + slot_index;
+  entry->slot_type = -1;
+  entry->primary_active_property_count = -1;
+  entry->primary_passive_property_count = -1;
+  entry->secondary_active_property_count = -1;
+  entry->secondary_passive_property_count = -1;
+}
+
+void SetQuickbarWeaponEntryError(QuickbarWeaponInfoEntry* entry, DWORD error) {
+  if (entry == nullptr || error == ERROR_SUCCESS) {
+    return;
+  }
+
+  if (entry->error == ERROR_SUCCESS) {
+    entry->error = static_cast<int32_t>(error);
+  }
+}
+
+void SetQuickbarWeaponPropertyCount(QuickbarWeaponInfoEntry* entry, int hand, int list, int32_t count) {
+  if (entry == nullptr) {
+    return;
+  }
+
+  if (hand == 1 && list == 1) {
+    entry->primary_active_property_count = count;
+  } else if (hand == 1 && list == 2) {
+    entry->primary_passive_property_count = count;
+  } else if (hand == 2 && list == 1) {
+    entry->secondary_active_property_count = count;
+  } else if (hand == 2 && list == 2) {
+    entry->secondary_passive_property_count = count;
+  }
+}
+
+bool IsDamageBonusPropertyName(int32_t property_name) {
+  return property_name == kItemPropertyDamageBonus ||
+      property_name == kItemPropertyDamageBonusVsAlignmentGroup ||
+      property_name == kItemPropertyDamageBonusVsRacialGroup ||
+      property_name == kItemPropertyDamageBonusVsSpecificAlignment;
+}
+
+int NormalizeClientDamageTypeValue(int value) {
+  if (value > 2 && value <= 11) {
+    return value + 2;
+  }
+  return value;
+}
+
+int NormalizeDamagePropertyMaskBit(const QuickbarWeaponPropertyRow& row) {
+  int value = row.property_name == kItemPropertyDamageBonus ? row.subtype : row.param1_value;
+  if (value < 0 || value >= kQuickbarWeaponDamageTypeCount) {
+    return -1;
+  }
+  return value;
+}
+
+void AddQuickbarWeaponDamageRow(QuickbarWeaponInfoEntry* entry, const QuickbarWeaponPropertyRow& row) {
+  if (entry == nullptr || !IsDamageBonusPropertyName(row.property_name)) {
+    return;
+  }
+
+  if (entry->damage_row_count < kQuickbarWeaponMaxDamageRows) {
+    entry->damage_rows[entry->damage_row_count] = row;
+  }
+  entry->damage_row_count += 1;
+
+  const int mask_bit = NormalizeDamagePropertyMaskBit(row);
+  if (mask_bit < 0) {
+    return;
+  }
+
+  uint32_t* mask = row.hand == 2 ? &entry->secondary_damage_mask : &entry->primary_damage_mask;
+  int32_t* amounts = row.hand == 2 ? entry->secondary_damage_amounts : entry->primary_damage_amounts;
+  *mask |= (1u << mask_bit);
+  if (row.cost_value > amounts[mask_bit]) {
+    amounts[mask_bit] = row.cost_value;
+  }
+}
+
+void AddQuickbarWeaponParsedDamageRow(QuickbarWeaponInfoEntry* entry, const QuickbarWeaponPropertyRow& row, int mask_bit) {
+  if (entry == nullptr || !IsDamageBonusPropertyName(row.property_name)) {
+    return;
+  }
+
+  if (entry->damage_row_count < kQuickbarWeaponMaxDamageRows) {
+    entry->damage_rows[entry->damage_row_count] = row;
+  }
+  entry->damage_row_count += 1;
+
+  if (mask_bit < 0 || mask_bit >= kQuickbarWeaponDamageTypeCount) {
+    return;
+  }
+
+  uint32_t* mask = row.hand == 2 ? &entry->secondary_damage_mask : &entry->primary_damage_mask;
+  int32_t* amounts = row.hand == 2 ? entry->secondary_damage_amounts : entry->primary_damage_amounts;
+  *mask |= (1u << mask_bit);
+  if (row.cost_value > amounts[mask_bit]) {
+    amounts[mask_bit] = row.cost_value;
+  }
+}
+
+const char* SkipAsciiWhitespace(const char* text) {
+  while (text != nullptr && (*text == ' ' || *text == '\t')) {
+    ++text;
+  }
+  return text;
+}
+
+bool StartsWithNoCase(const char* text, const char* prefix) {
+  if (text == nullptr || prefix == nullptr) {
+    return false;
+  }
+  const size_t prefix_length = strlen(prefix);
+  return _strnicmp(text, prefix, prefix_length) == 0;
+}
+
+bool ParseQuickbarWeaponDamageType(const char* text, int* out_damage_type, size_t* out_label_length) {
+  struct DamageTypeName {
+    const char* label;
+    int type;
+  };
+
+  static const DamageTypeName kDamageTypes[] = {
+      {"Bludgeoning", 0},
+      {"Piercing", 1},
+      {"Slashing", 2},
+      {"Subdual", 3},
+      {"Physical", 4},
+      {"Magical", 5},
+      {"Magic", 5},
+      {"Acid", 6},
+      {"Cold", 7},
+      {"Divine", 8},
+      {"Electrical", 9},
+      {"Electricity", 9},
+      {"Fire", 10},
+      {"Negative", 11},
+      {"Positive", 12},
+      {"Sonic", 13},
+      {"Ectoplasmic", 14},
+      {"Psionic", 15},
+      {"Sacred", 16},
+      {"Vile", 17},
+  };
+
+  if (text == nullptr || out_damage_type == nullptr || out_label_length == nullptr) {
+    return false;
+  }
+
+  for (int index = 0; index < static_cast<int>(_countof(kDamageTypes)); ++index) {
+    const size_t label_length = strlen(kDamageTypes[index].label);
+    if (_strnicmp(text, kDamageTypes[index].label, label_length) != 0) {
+      continue;
+    }
+    const char next = text[label_length];
+    if (next != '\0' && next != ' ' && next != '\t') {
+      continue;
+    }
+    *out_damage_type = kDamageTypes[index].type;
+    *out_label_length = label_length;
+    return true;
+  }
+
+  return false;
+}
+
+int ParseQuickbarWeaponDamageCostValue(const char* token) {
+  struct DamageCostName {
+    const char* label;
+    int value;
+  };
+
+  static const DamageCostName kDamageCosts[] = {
+      {"1d4", 6},
+      {"1d6", 7},
+      {"1d8", 8},
+      {"1d10", 9},
+      {"2d6", 10},
+      {"2d8", 11},
+      {"2d4", 12},
+      {"2d10", 13},
+      {"1d12", 14},
+      {"2d12", 15},
+      {"3d12", 78},
+      {"4d12", 79},
+      {"5d12", 80},
+      {"6d12", 81},
+      {"7d12", 82},
+      {"8d12", 83},
+      {"9d12", 84},
+      {"10d12", 85},
+      {"11d12", 124},
+      {"12d12", 125},
+      {"13d12", 126},
+      {"14d12", 127},
+      {"15d12", 128},
+      {"16d12", 129},
+      {"17d12", 130},
+      {"18d12", 131},
+      {"19d12", 132},
+      {"20d12", 133},
+      {"1d20", 48},
+      {"2d20", 49},
+      {"3d20", 50},
+      {"4d20", 51},
+      {"5d20", 52},
+      {"6d20", 53},
+      {"7d20", 54},
+      {"8d20", 55},
+      {"9d20", 56},
+      {"10d20", 57},
+  };
+
+  if (token == nullptr || token[0] == '\0') {
+    return 0;
+  }
+
+  for (int index = 0; index < static_cast<int>(_countof(kDamageCosts)); ++index) {
+    if (_stricmp(token, kDamageCosts[index].label) == 0) {
+      return kDamageCosts[index].value;
+    }
+  }
+
+  const char* cursor = token;
+  if (*cursor == '+') {
+    ++cursor;
+  }
+  int value = 0;
+  while (*cursor >= '0' && *cursor <= '9') {
+    value = value * 10 + (*cursor - '0');
+    ++cursor;
+  }
+  if (value <= 0 || *cursor != '\0') {
+    return 0;
+  }
+  return value <= 5 ? value : value + 10;
+}
+
+bool ParseQuickbarWeaponDescriptionDamageLine(const char* line, int hand, QuickbarWeaponPropertyRow* out, int* out_mask_bit) {
+  static const char* kPrefix = "Damage Bonus:";
+  if (line == nullptr || out == nullptr || out_mask_bit == nullptr || !StartsWithNoCase(line, kPrefix)) {
+    return false;
+  }
+
+  const char* cursor = SkipAsciiWhitespace(line + strlen(kPrefix));
+  int damage_type = -1;
+  size_t damage_type_length = 0;
+  if (!ParseQuickbarWeaponDamageType(cursor, &damage_type, &damage_type_length)) {
+    return false;
+  }
+
+  cursor = SkipAsciiWhitespace(cursor + damage_type_length);
+  char amount_token[32] = {};
+  size_t amount_length = 0;
+  while (cursor[amount_length] != '\0' &&
+      cursor[amount_length] != ' ' &&
+      cursor[amount_length] != '\t' &&
+      amount_length + 1 < sizeof(amount_token)) {
+    amount_token[amount_length] = cursor[amount_length];
+    ++amount_length;
+  }
+  amount_token[amount_length] = '\0';
+
+  const int cost_value = ParseQuickbarWeaponDamageCostValue(amount_token);
+  if (cost_value <= 0) {
+    return false;
+  }
+
+  cursor = SkipAsciiWhitespace(cursor + amount_length);
+  if (!StartsWithNoCase(cursor, "Damage")) {
+    return false;
+  }
+
+  ZeroMemory(out, sizeof(*out));
+  out->hand = hand;
+  out->list = kQuickbarWeaponDetailList;
+  out->property_name = kItemPropertyDamageBonus;
+  out->subtype = damage_type;
+  out->cost_table = 0;
+  out->cost_value = cost_value;
+  out->param1 = 0;
+  out->param1_value = damage_type;
+  *out_mask_bit = damage_type;
+  return true;
+}
+
+int ScanQuickbarWeaponDescriptionText(const char* text, int hand, QuickbarWeaponInfoEntry* entry) {
+  if (text == nullptr || entry == nullptr) {
+    return 0;
+  }
+
+  int added = 0;
+  const char* cursor = text;
+  while (*cursor != '\0') {
+    while (*cursor == '\r' || *cursor == '\n') {
+      ++cursor;
+    }
+    if (*cursor == '\0') {
+      break;
+    }
+
+    const char* line_start = cursor;
+    while (*cursor != '\0' && *cursor != '\r' && *cursor != '\n') {
+      ++cursor;
+    }
+
+    char line[512] = {};
+    size_t line_length = static_cast<size_t>(cursor - line_start);
+    if (line_length >= sizeof(line)) {
+      line_length = sizeof(line) - 1;
+    }
+    memcpy(line, line_start, line_length);
+    line[line_length] = '\0';
+
+    QuickbarWeaponPropertyRow row = {};
+    int mask_bit = -1;
+    if (ParseQuickbarWeaponDescriptionDamageLine(SkipAsciiWhitespace(line), hand, &row, &mask_bit)) {
+      AddQuickbarWeaponParsedDamageRow(entry, row, mask_bit);
+      ++added;
+    }
+  }
+
+  return added;
+}
+
+int ScanQuickbarWeaponItemDescription(uint32_t item_id, int hand, QuickbarWeaponInfoEntry* entry) {
+  struct NwnStringRef {
+    char* text;
+    int32_t length;
+  };
+
+  if (!IsValidObjectId(item_id) || entry == nullptr) {
+    return 0;
+  }
+
+  if ((hand == 2 ? entry->secondary_damage_mask : entry->primary_damage_mask) != 0) {
+    return 0;
+  }
+
+  const uint32_t app_object = ReadAppObjectPointer();
+  if (app_object == 0) {
+    return 0;
+  }
+
+  typedef void (__thiscall* InitNwnStringFn)(NwnStringRef* text_object);
+  typedef void (__thiscall* DestroyNwnStringFn)(NwnStringRef* text_object);
+  typedef void (__thiscall* BuildItemDescriptionFn)(void* app_object, uint32_t object_id, NwnStringRef* out_text);
+  const InitNwnStringFn init_string =
+      reinterpret_cast<InitNwnStringFn>(RebaseAddress(kExpectedNwnStringInit));
+  const DestroyNwnStringFn destroy_string =
+      reinterpret_cast<DestroyNwnStringFn>(RebaseAddress(kExpectedNwnStringDestroy));
+  const BuildItemDescriptionFn build_description =
+      reinterpret_cast<BuildItemDescriptionFn>(RebaseAddress(kExpectedItemDescriptionBuilder));
+
+  NwnStringRef description = {};
+  char text[kQuickbarWeaponDescriptionCapacity] = {};
+  DWORD last_error = ERROR_SUCCESS;
+  __try {
+    init_string(&description);
+    build_description(reinterpret_cast<void*>(app_object), item_id, &description);
+    if (description.text != nullptr && description.text[0] != '\0') {
+      strncpy_s(text, sizeof(text), description.text, _TRUNCATE);
+    }
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    last_error = GetExceptionCode();
+  }
+
+  __try {
+    destroy_string(&description);
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    if (last_error == ERROR_SUCCESS) {
+      last_error = GetExceptionCode();
+    }
+  }
+
+  if (last_error != ERROR_SUCCESS) {
+    SetQuickbarWeaponEntryError(entry, last_error);
+    LogMessage(
+        kLogDebug,
+        "quickbar weapon item description failed item=0x%08X hand=%d code=0x%08lX",
+        item_id,
+        hand,
+        static_cast<unsigned long>(last_error));
+    return 0;
+  }
+
+  const int added = ScanQuickbarWeaponDescriptionText(text, hand, entry);
+  char preview[160] = {};
+  strncpy_s(preview, sizeof(preview), text, _TRUNCATE);
+  for (size_t index = 0; preview[index] != '\0'; ++index) {
+    if (preview[index] == '\r' || preview[index] == '\n' || static_cast<unsigned char>(preview[index]) < 0x20u) {
+      preview[index] = ' ';
+    }
+  }
+  LogMessage(
+      kLogDebug,
+      "quickbar weapon item description item=0x%08X hand=%d len=%u rows=%d text=%s",
+      item_id,
+      hand,
+      static_cast<unsigned int>(strnlen(text, sizeof(text))),
+      added,
+      preview[0] != '\0' ? preview : "<empty>");
+  return added;
+}
+
+bool ReadClientItemPropertyRow(uint32_t row_ptr, int hand, QuickbarWeaponPropertyRow* out) {
+  if (out == nullptr || row_ptr == 0) {
+    return false;
+  }
+
+  uint16_t property_name = 0;
+  uint16_t subtype = 0;
+  uint16_t cost_value = 0;
+  BYTE param = 0;
+  if (!SafeReadValue(static_cast<uintptr_t>(row_ptr) + 0u, &property_name) ||
+      !SafeReadValue(static_cast<uintptr_t>(row_ptr) + 2u, &subtype) ||
+      !SafeReadValue(static_cast<uintptr_t>(row_ptr) + 6u, &cost_value) ||
+      !SafeReadValue(static_cast<uintptr_t>(row_ptr) + 8u, &param)) {
+    return false;
+  }
+
+  out->hand = hand;
+  out->list = 1;
+  out->property_name = static_cast<int32_t>(property_name);
+  out->subtype = static_cast<int32_t>(subtype);
+  out->cost_table = 0;
+  out->cost_value = static_cast<int32_t>(cost_value);
+  out->param1 = 0;
+  out->param1_value = static_cast<int32_t>(param);
+  return true;
+}
+
+bool ReadCompactItemPropertyRow(uintptr_t row_ptr, int hand, QuickbarWeaponPropertyRow* out) {
+  if (out == nullptr || row_ptr == 0) {
+    return false;
+  }
+
+  uint16_t property_name = 0;
+  uint16_t subtype = 0;
+  uint16_t cost_value = 0;
+  BYTE param = 0;
+  if (!SafeReadValue(row_ptr + 0u, &property_name) ||
+      !SafeReadValue(row_ptr + 2u, &subtype) ||
+      !SafeReadValue(row_ptr + 4u, &cost_value) ||
+      !SafeReadValue(row_ptr + 6u, &param)) {
+    return false;
+  }
+
+  if (!IsDamageBonusPropertyName(property_name) ||
+      subtype > 0x3Fu ||
+      cost_value == 0 ||
+      cost_value > 0x1FFu ||
+      (param != 0u && param != 1u && param != 0xFFu)) {
+    return false;
+  }
+
+  out->hand = hand;
+  out->list = kQuickbarWeaponDetailList;
+  out->property_name = static_cast<int32_t>(property_name);
+  out->subtype = static_cast<int32_t>(subtype);
+  out->cost_table = 0;
+  out->cost_value = static_cast<int32_t>(cost_value);
+  out->param1 = 0;
+  out->param1_value = static_cast<int32_t>(param);
+  return true;
+}
+
+bool ScanClientItemActiveProperties(uint32_t item_ptr, int hand, QuickbarWeaponInfoEntry* entry) {
+  if (item_ptr == 0 || entry == nullptr) {
+    return false;
+  }
+
+  int32_t count = 0;
+  if (!SafeReadValue(static_cast<uintptr_t>(item_ptr) + kClientItemActivePropertyCountOffset, &count)) {
+    SetQuickbarWeaponEntryError(entry, ERROR_INVALID_DATA);
+    SetQuickbarWeaponPropertyCount(entry, hand, 1, -1);
+    return false;
+  }
+
+  if (count < 0 || count > kItemPropertyMaxRows) {
+    SetQuickbarWeaponPropertyCount(entry, hand, 1, -1);
+    SetQuickbarWeaponEntryError(entry, ERROR_INVALID_DATA);
+    return false;
+  }
+
+  SetQuickbarWeaponPropertyCount(entry, hand, 1, count);
+  if (count == 0) {
+    return true;
+  }
+
+  const uint32_t data = SafeReadPointer32(static_cast<uintptr_t>(item_ptr) + kClientItemActivePropertyDataOffset);
+  if (data == 0) {
+    SetQuickbarWeaponEntryError(entry, ERROR_INVALID_DATA);
+    return false;
+  }
+
+  for (int32_t index = 0; index < count; ++index) {
+    QuickbarWeaponPropertyRow row = {};
+    const uint32_t row_ptr = data + static_cast<uint32_t>(index) * kClientItemPropertyStride;
+    if (!ReadClientItemPropertyRow(row_ptr, hand, &row)) {
+      SetQuickbarWeaponEntryError(entry, ERROR_INVALID_DATA);
+      return false;
+    }
+    AddQuickbarWeaponDamageRow(entry, row);
+  }
+
+  return true;
+}
+
+void ScanQuickbarWeaponItemProperties(uint32_t item_ptr, int hand, QuickbarWeaponInfoEntry* entry) {
+  if (item_ptr == 0 || entry == nullptr) {
+    return;
+  }
+
+  ScanClientItemActiveProperties(item_ptr, hand, entry);
+}
+
+int FindQuickbarWeaponDetailCacheIndexLocked(uint32_t item_id, bool create) {
+  if (!IsValidObjectId(item_id)) {
+    return -1;
+  }
+
+  int empty_index = -1;
+  for (int index = 0; index < kQuickbarWeaponDetailCacheCapacity; ++index) {
+    QuickbarWeaponDetailCacheEntry* entry = &g_quickbar_weapon_detail_cache[index];
+    if (entry->item_id == item_id) {
+      return index;
+    }
+    if (empty_index < 0 && entry->item_id == 0) {
+      empty_index = index;
+    }
+  }
+
+  if (!create || empty_index < 0) {
+    return -1;
+  }
+
+  QuickbarWeaponDetailCacheEntry* entry = &g_quickbar_weapon_detail_cache[empty_index];
+  ZeroMemory(entry, sizeof(*entry));
+  entry->item_id = item_id;
+  return empty_index;
+}
+
+void ClearQuickbarWeaponDetailPendingLocked(QuickbarWeaponDetailCacheEntry* entry) {
+  if (entry == nullptr || entry->pending == 0) {
+    return;
+  }
+  entry->pending = 0;
+  entry->pending_since = 0;
+  const LONG pending_count = InterlockedDecrement(&g_state.quickbar_weapon_detail_pending_count);
+  if (pending_count < 0) {
+    InterlockedExchange(&g_state.quickbar_weapon_detail_pending_count, 0);
+  }
+}
+
+BOOL HasPendingQuickbarWeaponDetailRequestsAtLeast(DWORD minimum_age_ms) {
+  if (!g_quickbar_weapon_detail_lock_ready) {
+    return FALSE;
+  }
+
+  BOOL has_pending = FALSE;
+  const DWORD now = GetTickCount();
+  EnterCriticalSection(&g_quickbar_weapon_detail_lock);
+  for (int index = 0; index < kQuickbarWeaponDetailCacheCapacity; ++index) {
+    QuickbarWeaponDetailCacheEntry* entry = &g_quickbar_weapon_detail_cache[index];
+    if (entry->pending == 0) {
+      continue;
+    }
+    if (now - entry->pending_since > kQuickbarWeaponDetailPendingTimeoutMs) {
+      ClearQuickbarWeaponDetailPendingLocked(entry);
+      continue;
+    }
+    if (now - entry->pending_since < minimum_age_ms) {
+      continue;
+    }
+    has_pending = TRUE;
+    break;
+  }
+  LeaveCriticalSection(&g_quickbar_weapon_detail_lock);
+  return has_pending;
+}
+
+BOOL HasPendingQuickbarWeaponDetailRequests() {
+  return HasPendingQuickbarWeaponDetailRequestsAtLeast(0u);
+}
+
+bool IsQuickbarWeaponDetailItemPending(uint32_t item_id) {
+  if (!g_quickbar_weapon_detail_lock_ready || !IsValidObjectId(item_id)) {
+    return false;
+  }
+
+  bool pending = false;
+  EnterCriticalSection(&g_quickbar_weapon_detail_lock);
+  const int index = FindQuickbarWeaponDetailCacheIndexLocked(item_id, false);
+  if (index >= 0) {
+    const QuickbarWeaponDetailCacheEntry* entry = &g_quickbar_weapon_detail_cache[index];
+    pending = entry->pending != 0;
+  }
+  LeaveCriticalSection(&g_quickbar_weapon_detail_lock);
+  return pending;
+}
+
+void CompleteQuickbarWeaponDetailCacheFromItemInfoResponse(uint32_t item_id) {
+  if (!g_quickbar_weapon_detail_lock_ready || !IsValidObjectId(item_id)) {
+    return;
+  }
+
+  EnterCriticalSection(&g_quickbar_weapon_detail_lock);
+  const int index = FindQuickbarWeaponDetailCacheIndexLocked(item_id, false);
+  if (index >= 0) {
+    QuickbarWeaponDetailCacheEntry* entry = &g_quickbar_weapon_detail_cache[index];
+    if (entry->pending != 0) {
+      if (!entry->valid) {
+        entry->valid = 1;
+        entry->row_count = 0;
+        entry->last_error = ERROR_SUCCESS;
+        ZeroMemory(entry->rows, sizeof(entry->rows));
+      }
+      ClearQuickbarWeaponDetailPendingLocked(entry);
+    }
+  }
+  LeaveCriticalSection(&g_quickbar_weapon_detail_lock);
+}
+
+uint32_t ResolveCurrentItemInfoPanel() {
+  const uint32_t manager = SafeReadPointer32(RebaseAddress(kExpectedItemInfoPanelManager));
+  if (manager == 0) {
+    return 0;
+  }
+
+  const uint32_t vtable = SafeReadPointer32(manager);
+  const uint32_t getter = vtable != 0 ? SafeReadPointer32(static_cast<uintptr_t>(vtable) + 0xA4u) : 0;
+  if (getter == 0) {
+    return 0;
+  }
+
+  typedef void* (__thiscall* GetItemInfoPanelFn)(void* self);
+  void* panel = nullptr;
+  __try {
+    panel = reinterpret_cast<GetItemInfoPanelFn>(getter)(reinterpret_cast<void*>(manager));
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    return 0;
+  }
+  return static_cast<uint32_t>(reinterpret_cast<uintptr_t>(panel));
+}
+
+extern "C" void HideQuietItemInfoPanelIfPending() {
+  if (!HasPendingQuickbarWeaponDetailRequests()) {
+    return;
+  }
+
+  const uint32_t panel = ResolveCurrentItemInfoPanel();
+  if (panel == 0) {
+    return;
+  }
+
+  uint32_t item_id = 0;
+  const bool has_item_id =
+      SafeReadValue(static_cast<uintptr_t>(panel) + kItemInfoPanelItemIdOffset, &item_id) &&
+      IsValidObjectId(item_id);
+  const bool completes_pending_item =
+      has_item_id && IsQuickbarWeaponDetailItemPending(item_id);
+  if (!has_item_id) {
+    return;
+  }
+
+  if (completes_pending_item) {
+    CompleteQuickbarWeaponDetailCacheFromItemInfoResponse(item_id);
+  }
+
+  typedef void (__thiscall* GuiSetVisibleFn)(void* self, int visible);
+  const GuiSetVisibleFn set_visible =
+      reinterpret_cast<GuiSetVisibleFn>(RebaseAddress(kExpectedGuiSetVisible));
+  __try {
+    set_visible(reinterpret_cast<void*>(panel), 0);
+    LogMessage(
+        kLogDebug,
+        "quickbar weapon detail hid item info panel item=0x%08X panel=0x%08X matched=%d",
+        item_id,
+        panel,
+        completes_pending_item ? 1 : 0);
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    LogMessage(
+        kLogError,
+        "quickbar weapon detail hide pending item info panel failed item=0x%08X panel=0x%08X code=0x%08lX",
+        item_id,
+        panel,
+        static_cast<unsigned long>(GetExceptionCode()));
+  }
+
+  MaybeUninstallQuickbarWeaponDetailHooks();
+}
+
+bool IsQuickbarWeaponDetailSlotRequested(int bit_index, uint32_t mask_low, uint32_t mask_high) {
+  if (bit_index < 0 || bit_index >= kQuickbarWeaponEntryCount) {
+    return false;
+  }
+  if (bit_index < 32) {
+    return (mask_low & (1u << bit_index)) != 0;
+  }
+  return (mask_high & (1u << (bit_index - 32))) != 0;
+}
+
+bool MarkQuickbarWeaponDetailPending(uint32_t item_id, bool* out_already_valid) {
+  if (out_already_valid != nullptr) {
+    *out_already_valid = false;
+  }
+  if (!g_quickbar_weapon_detail_lock_ready || !IsValidObjectId(item_id)) {
+    return false;
+  }
+
+  bool should_request = false;
+  const DWORD now = GetTickCount();
+  EnterCriticalSection(&g_quickbar_weapon_detail_lock);
+  const int index = FindQuickbarWeaponDetailCacheIndexLocked(item_id, true);
+  if (index >= 0) {
+    QuickbarWeaponDetailCacheEntry* entry = &g_quickbar_weapon_detail_cache[index];
+    if (entry->valid) {
+      if (out_already_valid != nullptr) {
+        *out_already_valid = true;
+      }
+    } else if (entry->pending == 0) {
+      entry->pending = 1;
+      entry->pending_since = now;
+      InterlockedIncrement(&g_state.quickbar_weapon_detail_pending_count);
+      should_request = true;
+    } else if (now - entry->pending_since > 2000u) {
+      entry->pending_since = now;
+      should_request = true;
+    }
+  }
+  LeaveCriticalSection(&g_quickbar_weapon_detail_lock);
+  return should_request;
+}
+
+int ApplyQuickbarWeaponDetailCacheRows(uint32_t item_id, int hand, QuickbarWeaponInfoEntry* entry) {
+  if (!g_quickbar_weapon_detail_lock_ready || entry == nullptr || !IsValidObjectId(item_id)) {
+    return 0;
+  }
+
+  QuickbarWeaponPropertyRow rows[kQuickbarWeaponMaxDamageRows] = {};
+  int row_count = -1;
+  DWORD last_error = ERROR_SUCCESS;
+  EnterCriticalSection(&g_quickbar_weapon_detail_lock);
+  const int index = FindQuickbarWeaponDetailCacheIndexLocked(item_id, false);
+  if (index >= 0) {
+    QuickbarWeaponDetailCacheEntry* cached = &g_quickbar_weapon_detail_cache[index];
+    if (cached->valid) {
+      ClearQuickbarWeaponDetailPendingLocked(cached);
+      row_count = cached->row_count;
+      last_error = cached->last_error;
+      const int copy_count = row_count < kQuickbarWeaponMaxDamageRows ? row_count : kQuickbarWeaponMaxDamageRows;
+      for (int row_index = 0; row_index < copy_count; ++row_index) {
+        rows[row_index] = cached->rows[row_index];
+      }
+    }
+  }
+  LeaveCriticalSection(&g_quickbar_weapon_detail_lock);
+
+  if (row_count < 0) {
+    return 0;
+  }
+  if (last_error != ERROR_SUCCESS) {
+    SetQuickbarWeaponEntryError(entry, last_error);
+  }
+  if (hand == 2) {
+    entry->secondary_passive_property_count = row_count;
+  } else {
+    entry->primary_passive_property_count = row_count;
+  }
+
+  const int stored = row_count < kQuickbarWeaponMaxDamageRows ? row_count : kQuickbarWeaponMaxDamageRows;
+  for (int row_index = 0; row_index < stored; ++row_index) {
+    QuickbarWeaponPropertyRow row = rows[row_index];
+    row.hand = hand;
+    row.list = kQuickbarWeaponDetailList;
+    AddQuickbarWeaponDamageRow(entry, row);
+  }
+  InterlockedIncrement(&g_state.quickbar_weapon_detail_cache_hits);
+  return stored;
+}
+
+void StoreQuickbarWeaponDetailCacheRows(uint32_t item_ptr, DWORD last_error) {
+  if (!g_quickbar_weapon_detail_lock_ready || item_ptr == 0) {
+    return;
+  }
+
+  uint32_t item_id = 0;
+  int32_t property_count = 0;
+  uint32_t property_data = 0;
+  QuickbarWeaponPropertyRow rows[kQuickbarWeaponMaxDamageRows] = {};
+  int stored_rows = 0;
+  if (!SafeReadValue(static_cast<uintptr_t>(item_ptr) + 0x14u, &item_id) ||
+      !IsValidObjectId(item_id)) {
+    return;
+  }
+
+  if (last_error == ERROR_SUCCESS) {
+    if (!SafeReadValue(static_cast<uintptr_t>(item_ptr) + kClientItemActivePropertyCountOffset, &property_count) ||
+        property_count < 0 ||
+        property_count > kItemPropertyMaxRows) {
+      last_error = ERROR_INVALID_DATA;
+      property_count = 0;
+    }
+  }
+
+  if (last_error == ERROR_SUCCESS && property_count > 0) {
+    property_data = SafeReadPointer32(static_cast<uintptr_t>(item_ptr) + kClientItemActivePropertyDataOffset);
+    if (property_data == 0) {
+      last_error = ERROR_INVALID_DATA;
+    }
+  }
+
+  if (last_error == ERROR_SUCCESS && property_data != 0) {
+    for (int32_t index = 0; index < property_count; ++index) {
+      QuickbarWeaponPropertyRow row = {};
+      const uint32_t row_ptr = property_data + static_cast<uint32_t>(index) * kClientItemPropertyStride;
+      if (!ReadClientItemPropertyRow(row_ptr, 0, &row)) {
+        last_error = ERROR_INVALID_DATA;
+        break;
+      }
+      row.list = kQuickbarWeaponDetailList;
+      if (!IsDamageBonusPropertyName(row.property_name)) {
+        continue;
+      }
+      if (stored_rows < kQuickbarWeaponMaxDamageRows) {
+        rows[stored_rows] = row;
+      }
+      ++stored_rows;
+    }
+  }
+
+  EnterCriticalSection(&g_quickbar_weapon_detail_lock);
+  const int cache_index = FindQuickbarWeaponDetailCacheIndexLocked(item_id, false);
+  if (cache_index >= 0) {
+    QuickbarWeaponDetailCacheEntry* entry = &g_quickbar_weapon_detail_cache[cache_index];
+    ClearQuickbarWeaponDetailPendingLocked(entry);
+    entry->valid = 1;
+    entry->row_count = stored_rows;
+    entry->last_error = last_error;
+    ZeroMemory(entry->rows, sizeof(entry->rows));
+    const int copy_count = stored_rows < kQuickbarWeaponMaxDamageRows ? stored_rows : kQuickbarWeaponMaxDamageRows;
+    for (int index = 0; index < copy_count; ++index) {
+      entry->rows[index] = rows[index];
+    }
+  } else {
+    LogMessage(
+        kLogDebug,
+        "quickbar weapon detail cache ignored unrequested item=0x%08X ptr=0x%08X props=%ld damageRows=%d err=%lu",
+        item_id,
+        item_ptr,
+        static_cast<long>(property_count),
+        stored_rows,
+        static_cast<unsigned long>(last_error));
+  }
+  LeaveCriticalSection(&g_quickbar_weapon_detail_lock);
+
+  LogMessage(
+      kLogDebug,
+      "quickbar weapon detail cache item=0x%08X ptr=0x%08X props=%ld damageRows=%d err=%lu",
+      item_id,
+      item_ptr,
+      static_cast<long>(property_count),
+      stored_rows,
+      static_cast<unsigned long>(last_error));
+}
+
+void StoreQuickbarWeaponDetailCacheScanResult(const QuickbarWeaponDetailScanResult& result) {
+  if (!g_quickbar_weapon_detail_lock_ready || !IsValidObjectId(result.item_id) || result.found == 0) {
+    return;
+  }
+
+  EnterCriticalSection(&g_quickbar_weapon_detail_lock);
+  const int cache_index = FindQuickbarWeaponDetailCacheIndexLocked(result.item_id, false);
+  if (cache_index >= 0) {
+    QuickbarWeaponDetailCacheEntry* entry = &g_quickbar_weapon_detail_cache[cache_index];
+    ClearQuickbarWeaponDetailPendingLocked(entry);
+    entry->valid = 1;
+    entry->row_count = result.row_count;
+    entry->last_error = ERROR_SUCCESS;
+    ZeroMemory(entry->rows, sizeof(entry->rows));
+    const int copy_count = result.row_count < kQuickbarWeaponMaxDamageRows
+        ? result.row_count
+        : kQuickbarWeaponMaxDamageRows;
+    for (int index = 0; index < copy_count; ++index) {
+      entry->rows[index] = result.rows[index];
+    }
+  }
+  LeaveCriticalSection(&g_quickbar_weapon_detail_lock);
+
+  LogMessage(
+      kLogDebug,
+      "quickbar weapon detail scan cache item=0x%08X damageRows=%d",
+      result.item_id,
+      result.row_count);
+}
+
+void CaptureQuietItemDetailResult(uint32_t item_ptr, int parse_result) {
+  StoreQuickbarWeaponDetailCacheRows(
+      item_ptr,
+      parse_result != 0 && item_ptr != 0 ? ERROR_SUCCESS : ERROR_NOT_FOUND);
+}
+
+void StoreQuickbarWeaponDetailCacheNetworkRow(uint32_t item_id, const QuickbarWeaponPropertyRow& row) {
+  if (!g_quickbar_weapon_detail_lock_ready || !IsValidObjectId(item_id)) {
+    return;
+  }
+
+  bool accepted = false;
+  bool stored_damage = false;
+  int stored_rows = 0;
+  EnterCriticalSection(&g_quickbar_weapon_detail_lock);
+  const int cache_index = FindQuickbarWeaponDetailCacheIndexLocked(item_id, false);
+  if (cache_index >= 0) {
+    QuickbarWeaponDetailCacheEntry* entry = &g_quickbar_weapon_detail_cache[cache_index];
+    if (entry->pending != 0 || !entry->valid) {
+      accepted = true;
+      if (!entry->valid) {
+        entry->valid = 1;
+        entry->row_count = 0;
+        entry->last_error = ERROR_SUCCESS;
+        ZeroMemory(entry->rows, sizeof(entry->rows));
+      }
+
+      if (IsDamageBonusPropertyName(row.property_name)) {
+        bool duplicate = false;
+        const int compare_count = entry->row_count < kQuickbarWeaponMaxDamageRows
+            ? entry->row_count
+            : kQuickbarWeaponMaxDamageRows;
+        for (int index = 0; index < compare_count; ++index) {
+          const QuickbarWeaponPropertyRow& existing = entry->rows[index];
+          if (existing.property_name == row.property_name &&
+              existing.subtype == row.subtype &&
+              existing.cost_value == row.cost_value &&
+              existing.param1_value == row.param1_value) {
+            duplicate = true;
+            break;
+          }
+        }
+        if (!duplicate) {
+          if (entry->row_count < kQuickbarWeaponMaxDamageRows) {
+            entry->rows[entry->row_count] = row;
+          }
+          entry->row_count += 1;
+          stored_damage = true;
+        }
+      }
+      stored_rows = entry->row_count;
+    }
+  }
+  LeaveCriticalSection(&g_quickbar_weapon_detail_lock);
+
+  if (accepted && (stored_damage || IsDamageBonusPropertyName(row.property_name))) {
+    LogMessage(
+        kLogDebug,
+        "quickbar weapon detail network row item=0x%08X prop=%ld subtype=%ld cost=%ld param=%ld active=%ld damageRows=%d stored=%d",
+        item_id,
+        static_cast<long>(row.property_name),
+        static_cast<long>(row.subtype),
+        static_cast<long>(row.cost_value),
+        static_cast<long>(row.param1_value),
+        static_cast<long>(row.param1),
+        stored_rows,
+        stored_damage ? 1 : 0);
+  }
+}
+
+extern "C" void CaptureItemInfoPropertyRow(
+    void* panel,
+    uint32_t property_name,
+    uint32_t subtype,
+    uint32_t cost_value,
+    uint32_t param1_value,
+    uint32_t active) {
+  if (panel == nullptr) {
+    return;
+  }
+
+  uint32_t item_id = 0;
+  if (!SafeReadValue(reinterpret_cast<uintptr_t>(panel) + kItemInfoPanelItemIdOffset, &item_id) ||
+      !IsValidObjectId(item_id)) {
+    return;
+  }
+
+  QuickbarWeaponPropertyRow row = {};
+  row.hand = 0;
+  row.list = kQuickbarWeaponDetailList;
+  row.property_name = static_cast<int32_t>(property_name & 0xFFFFu);
+  row.subtype = static_cast<int32_t>(subtype & 0xFFFFu);
+  row.cost_table = 0;
+  row.cost_value = static_cast<int32_t>(cost_value & 0xFFFFu);
+  row.param1 = active != 0 ? 1 : 0;
+  row.param1_value = static_cast<int32_t>(param1_value & 0xFFu);
+
+  StoreQuickbarWeaponDetailCacheNetworkRow(item_id, row);
+}
+
+extern "C" int TryQuietItemInfoParser(void* message, uint32_t arg0, uint32_t arg4) {
+  const BOOL has_pending = HasPendingQuickbarWeaponDetailRequests();
+  const bool caller_supplied_output = arg0 == 1 && arg4 != 0;
+  if (message == nullptr || g_item_info_parser_gateway == nullptr ||
+      (!has_pending && !caller_supplied_output)) {
+    return kQuietItemInfoParserNotHandled;
+  }
+
+  typedef int (__thiscall* ItemInfoParserFn)(void* self, uint32_t quiet_mode, uint32_t* out_item);
+  uint32_t out_item = 0;
+  int parse_result = 0;
+  __try {
+    const ItemInfoParserFn parser =
+        reinterpret_cast<ItemInfoParserFn>(g_item_info_parser_gateway);
+    if (arg0 == 1 && arg4 != 0) {
+      uint32_t* caller_out_item = reinterpret_cast<uint32_t*>(arg4);
+      parse_result = parser(message, arg0, caller_out_item);
+      out_item = *caller_out_item;
+    } else if (arg0 == 0) {
+      parse_result = parser(message, 1, &out_item);
+    } else {
+      return kQuietItemInfoParserNotHandled;
+    }
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    parse_result = 0;
+    out_item = 0;
+  }
+
+  CaptureQuietItemDetailResult(out_item, parse_result);
+  LogMessage(
+      kLogDebug,
+      "item info parser quiet capture mode=%lu pending=%ld callerOut=%d result=%d itemPtr=0x%08X arg4=0x%08X",
+      static_cast<unsigned long>(arg0),
+      static_cast<long>(has_pending),
+      caller_supplied_output ? 1 : 0,
+      parse_result,
+      out_item,
+      arg4);
+  return parse_result;
+}
+
+void RequestQuickbarWeaponItemDetailOnWindowThread(uint32_t item_id, int hand, QuickbarWeaponInfoEntry* entry) {
+  if (!IsValidObjectId(item_id) || entry == nullptr) {
+    return;
+  }
+
+  if (ApplyQuickbarWeaponDetailCacheRows(item_id, hand, entry) > 0 ||
+      (hand == 2 ? entry->secondary_passive_property_count : entry->primary_passive_property_count) >= 0) {
+    return;
+  }
+
+  bool already_valid = false;
+  const bool should_request = MarkQuickbarWeaponDetailPending(item_id, &already_valid);
+  if (already_valid) {
+    ApplyQuickbarWeaponDetailCacheRows(item_id, hand, entry);
+    return;
+  }
+
+  if (hand == 2) {
+    entry->secondary_detail_requested = 1;
+  } else {
+    entry->primary_detail_requested = 1;
+  }
+  if (!should_request) {
+    return;
+  }
+
+  if (!EnsureQuickbarWeaponDetailHooksInstalled()) {
+    const DWORD hook_error = GetLastError();
+    SetQuickbarWeaponEntryError(entry, hook_error);
+    EnterCriticalSection(&g_quickbar_weapon_detail_lock);
+    const int cache_index = FindQuickbarWeaponDetailCacheIndexLocked(item_id, false);
+    if (cache_index >= 0) {
+      ClearQuickbarWeaponDetailPendingLocked(&g_quickbar_weapon_detail_cache[cache_index]);
+    }
+    LeaveCriticalSection(&g_quickbar_weapon_detail_lock);
+    MaybeUninstallQuickbarWeaponDetailHooks();
+    LogMessage(
+        kLogError,
+        "quickbar weapon detail hook install failed item=0x%08X hand=%d err=%lu",
+        item_id,
+        hand,
+        static_cast<unsigned long>(hook_error));
+    return;
+  }
+
+  typedef void* (__thiscall* ResolveItemMessageFn)(void* app_object);
+  typedef void (__thiscall* RequestItemDetailFn)(void* message, uint32_t item_id);
+  const uint32_t app_object = ReadAppObjectPointer();
+  if (app_object == 0) {
+    SetQuickbarWeaponEntryError(entry, ERROR_NOT_FOUND);
+    return;
+  }
+
+  DWORD last_error = ERROR_SUCCESS;
+  __try {
+    const ResolveItemMessageFn resolve_item_message =
+        reinterpret_cast<ResolveItemMessageFn>(RebaseAddress(kExpectedItemMessageResolver));
+    const RequestItemDetailFn request_detail =
+        reinterpret_cast<RequestItemDetailFn>(RebaseAddress(kExpectedItemDetailRequest));
+    void* item_message = resolve_item_message(reinterpret_cast<void*>(app_object));
+    if (item_message == nullptr) {
+      last_error = ERROR_NOT_FOUND;
+    } else {
+      request_detail(item_message, item_id);
+    }
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    last_error = GetExceptionCode();
+  }
+
+  if (last_error != ERROR_SUCCESS) {
+    SetQuickbarWeaponEntryError(entry, last_error);
+    EnterCriticalSection(&g_quickbar_weapon_detail_lock);
+    const int cache_index = FindQuickbarWeaponDetailCacheIndexLocked(item_id, false);
+    if (cache_index >= 0) {
+      ClearQuickbarWeaponDetailPendingLocked(&g_quickbar_weapon_detail_cache[cache_index]);
+    }
+    LeaveCriticalSection(&g_quickbar_weapon_detail_lock);
+    MaybeUninstallQuickbarWeaponDetailHooks();
+  }
+
+  LogMessage(
+      kLogDebug,
+      "quickbar weapon detail request item=0x%08X hand=%d err=%lu",
+      item_id,
+      hand,
+      static_cast<unsigned long>(last_error));
+}
+
+LONG ResolveQuickbarWeaponEquippedState(void* item_object, void* item_equipped_owner_fn, uint32_t current_player_object_id) {
+  if (item_object == nullptr || item_equipped_owner_fn == nullptr || current_player_object_id == 0) {
+    return 0;
+  }
+
+  typedef void* (__thiscall* ItemEquippedOwnerFn)(void* item_object);
+  const ItemEquippedOwnerFn item_equipped_owner = reinterpret_cast<ItemEquippedOwnerFn>(item_equipped_owner_fn);
+  __try {
+    void* owner = item_equipped_owner(item_object);
+    if (owner == nullptr) {
+      return 0;
+    }
+    return SafeReadPointer32(reinterpret_cast<uintptr_t>(owner) + 4u) == current_player_object_id ? 1 : 0;
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    return -1;
+  }
+}
+
+int FindQuickbarWeaponDetailResult(
+    QuickbarWeaponDetailScanResult* results,
+    int count,
+    uint32_t item_id) {
+  if (results == nullptr || !IsValidObjectId(item_id)) {
+    return -1;
+  }
+
+  for (int index = 0; index < count; ++index) {
+    if (results[index].item_id == item_id) {
+      return index;
+    }
+  }
+  return -1;
+}
+
+int CollectQuickbarWeaponDetailTargets(
+    const QuickbarWeaponInfoEntry* entries,
+    int count,
+    QuickbarWeaponDetailScanResult* results,
+    int capacity,
+    bool pending_only) {
+  if (entries == nullptr || results == nullptr || capacity <= 0) {
+    return 0;
+  }
+
+  int result_count = 0;
+  for (int index = 0; index < count; ++index) {
+    const QuickbarWeaponInfoEntry& entry = entries[index];
+    const uint32_t ids[] = {entry.primary_item_id, entry.secondary_item_id};
+    for (int id_index = 0; id_index < 2; ++id_index) {
+      const uint32_t item_id = ids[id_index];
+      if (!IsValidObjectId(item_id) ||
+          (pending_only && !IsQuickbarWeaponDetailItemPending(item_id)) ||
+          FindQuickbarWeaponDetailResult(results, result_count, item_id) >= 0) {
+        continue;
+      }
+      if (result_count >= capacity) {
+        return result_count;
+      }
+      ZeroMemory(&results[result_count], sizeof(results[result_count]));
+      results[result_count].item_id = item_id;
+      ++result_count;
+    }
+  }
+  return result_count;
+}
+
+bool IsMemoryRangeNearAddress(uintptr_t range_base, uintptr_t range_end, uintptr_t address, uintptr_t distance) {
+  if (address == 0 || range_end <= range_base) {
+    return false;
+  }
+
+  const uintptr_t low = address > distance ? address - distance : 0;
+  const uintptr_t high = address > UINTPTR_MAX - distance ? UINTPTR_MAX : address + distance;
+  return range_base <= high && range_end >= low;
+}
+
+bool LooksLikeClientItemDetailRecord(uintptr_t object_id_address, uintptr_t region_end) {
+  if (object_id_address + 16u >= region_end) {
+    return false;
+  }
+
+  uint32_t marker = 0;
+  uint32_t text_length = 0;
+  BYTE first_text_byte = 0;
+  if (!SafeReadValue(object_id_address + 4u, &marker) ||
+      !SafeReadValue(object_id_address + 8u, &text_length) ||
+      !SafeReadValue(object_id_address + 12u, &first_text_byte)) {
+    return false;
+  }
+
+  if (marker == kClientItemQuickbarObjectMarker) {
+    return text_length > 0u && text_length < 0x4000u;
+  }
+
+  return marker == kClientItemDetailObjectMarker &&
+      text_length > 0u &&
+      text_length < 0x4000u &&
+      (first_text_byte == '-' || first_text_byte == '\r' || first_text_byte == '\n' ||
+          (first_text_byte >= 0x20u && first_text_byte < 0x7Fu));
+}
+
+int ExtractQuickbarWeaponDetailRowsBeforeObjectId(
+    uintptr_t object_id_address,
+    uintptr_t region_base,
+    int hand,
+    QuickbarWeaponPropertyRow* rows,
+    int capacity) {
+  if (rows == nullptr || capacity <= 0 || object_id_address <= region_base) {
+    return 0;
+  }
+
+  uintptr_t scan_start = object_id_address > static_cast<uintptr_t>(kQuickbarWeaponDetailBackscanBytes)
+      ? object_id_address - static_cast<uintptr_t>(kQuickbarWeaponDetailBackscanBytes)
+      : region_base;
+  if (scan_start < region_base) {
+    scan_start = region_base;
+  }
+
+  int row_count = 0;
+  for (uintptr_t cursor = scan_start; cursor + 7u <= object_id_address; ++cursor) {
+    QuickbarWeaponPropertyRow row = {};
+    if (!ReadCompactItemPropertyRow(cursor, hand, &row)) {
+      continue;
+    }
+    if (row_count < capacity) {
+      rows[row_count] = row;
+    }
+    ++row_count;
+  }
+  return row_count;
+}
+
+void ScanQuickbarWeaponDetailRegion(
+    uintptr_t region_base,
+    uintptr_t region_end,
+    QuickbarWeaponDetailScanResult* results,
+    int result_count,
+    bool single_row_results_only) {
+  if (results == nullptr || result_count <= 0 || region_end <= region_base + sizeof(uint32_t)) {
+    return;
+  }
+
+  __try {
+    const BYTE* const bytes = reinterpret_cast<const BYTE*>(region_base);
+    const size_t region_size = static_cast<size_t>(region_end - region_base);
+    if (region_size < sizeof(uint32_t)) {
+      return;
+    }
+
+    for (int result_index = 0; result_index < result_count; ++result_index) {
+      QuickbarWeaponDetailScanResult* result = &results[result_index];
+      if (!IsValidObjectId(result->item_id)) {
+        continue;
+      }
+      if (single_row_results_only && result->row_count != 1) {
+        continue;
+      }
+
+      const BYTE* const needle = reinterpret_cast<const BYTE*>(&result->item_id);
+      size_t offset = 0;
+      while (offset + sizeof(uint32_t) <= region_size) {
+        const void* found = memchr(bytes + offset, needle[0], region_size - offset - sizeof(uint32_t) + 1u);
+        if (found == nullptr) {
+          break;
+        }
+
+        const BYTE* const match = static_cast<const BYTE*>(found);
+        offset = static_cast<size_t>(match - bytes) + 1u;
+        const uintptr_t object_id_address = region_base + static_cast<uintptr_t>(match - bytes);
+        uint32_t value = 0;
+        memcpy(&value, match, sizeof(value));
+        if (value != result->item_id ||
+            !LooksLikeClientItemDetailRecord(object_id_address, region_end)) {
+          continue;
+        }
+
+        QuickbarWeaponPropertyRow rows[kQuickbarWeaponMaxDamageRows] = {};
+        const int row_count = ExtractQuickbarWeaponDetailRowsBeforeObjectId(
+            object_id_address,
+            region_base,
+            1,
+            rows,
+            kQuickbarWeaponMaxDamageRows);
+        result->found = 1;
+        if (row_count <= result->row_count) {
+          continue;
+        }
+
+        result->row_count = row_count;
+        ZeroMemory(result->rows, sizeof(result->rows));
+        const int stored = row_count < kQuickbarWeaponMaxDamageRows ? row_count : kQuickbarWeaponMaxDamageRows;
+        for (int row_index = 0; row_index < stored; ++row_index) {
+          result->rows[row_index] = rows[row_index];
+        }
+      }
+    }
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    LogMessage(
+        kLogDebug,
+        "quickbar weapon detail region scan skipped base=0x%08X code=0x%08lX",
+        static_cast<unsigned int>(region_base),
+        static_cast<unsigned long>(GetExceptionCode()));
+  }
+}
+
+void ApplyQuickbarWeaponDetailRows(
+    QuickbarWeaponInfoEntry* entry,
+    int hand,
+    const QuickbarWeaponDetailScanResult& result) {
+  if (entry == nullptr || result.found == 0) {
+    return;
+  }
+
+  if (hand == 2) {
+    entry->secondary_passive_property_count = result.row_count;
+  } else {
+    entry->primary_passive_property_count = result.row_count;
+  }
+  if (result.row_count <= 0) {
+    return;
+  }
+
+  const int stored = result.row_count < kQuickbarWeaponMaxDamageRows
+      ? result.row_count
+      : kQuickbarWeaponMaxDamageRows;
+  for (int row_index = 0; row_index < stored; ++row_index) {
+    QuickbarWeaponPropertyRow row = result.rows[row_index];
+    row.hand = hand;
+    AddQuickbarWeaponDamageRow(entry, row);
+  }
+}
+
+void ScanQuickbarWeaponDetailBlobs(QuickbarWeaponInfoEntry* entries, int count) {
+  if (entries == nullptr || count <= 0) {
+    return;
+  }
+
+  QuickbarWeaponDetailScanResult* results = g_state.quickbar_weapon_detail_results;
+  ZeroMemory(g_state.quickbar_weapon_detail_results, sizeof(g_state.quickbar_weapon_detail_results));
+  const int result_count = CollectQuickbarWeaponDetailTargets(
+      entries,
+      count,
+      results,
+      kQuickbarWeaponDetailMaxUniqueItems,
+      true);
+  if (result_count <= 0) {
+    return;
+  }
+
+  SYSTEM_INFO system_info = {};
+  GetSystemInfo(&system_info);
+  uintptr_t cursor = reinterpret_cast<uintptr_t>(system_info.lpMinimumApplicationAddress);
+  const uintptr_t maximum = reinterpret_cast<uintptr_t>(system_info.lpMaximumApplicationAddress);
+  const uintptr_t quickbar_panel =
+      static_cast<uintptr_t>(InterlockedCompareExchange(&g_state.quickbar_this, 0, 0));
+  const uintptr_t app_object = static_cast<uintptr_t>(ReadAppObjectPointer());
+
+  while (cursor < maximum) {
+    MEMORY_BASIC_INFORMATION mbi = {};
+    if (VirtualQuery(reinterpret_cast<LPCVOID>(cursor), &mbi, sizeof(mbi)) != sizeof(mbi)) {
+      break;
+    }
+
+    const uintptr_t region_base = reinterpret_cast<uintptr_t>(mbi.BaseAddress);
+    const uintptr_t region_end = region_base + mbi.RegionSize;
+    if (region_end < region_base) {
+      break;
+    }
+
+    if (mbi.State == MEM_COMMIT &&
+        mbi.Type == MEM_PRIVATE &&
+        (mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS)) == 0 &&
+        IsReadableWritableProtection(mbi.Protect) &&
+        IsMemoryRangeNearAddress(
+            region_base,
+            region_end,
+            quickbar_panel,
+            kQuickbarWeaponDetailNearbyBytes) &&
+        region_end > region_base + sizeof(uint32_t)) {
+      ScanQuickbarWeaponDetailRegion(region_base, region_end, results, result_count, false);
+    }
+
+    cursor = region_end;
+  }
+
+  bool needs_single_row_fallback = false;
+  for (int result_index = 0; result_index < result_count; ++result_index) {
+    if (results[result_index].row_count == 1) {
+      needs_single_row_fallback = true;
+      break;
+    }
+  }
+  if (needs_single_row_fallback && app_object != 0) {
+    cursor = reinterpret_cast<uintptr_t>(system_info.lpMinimumApplicationAddress);
+    while (cursor < maximum) {
+      MEMORY_BASIC_INFORMATION mbi = {};
+      if (VirtualQuery(reinterpret_cast<LPCVOID>(cursor), &mbi, sizeof(mbi)) != sizeof(mbi)) {
+        break;
+      }
+
+      const uintptr_t region_base = reinterpret_cast<uintptr_t>(mbi.BaseAddress);
+      const uintptr_t region_end = region_base + mbi.RegionSize;
+      if (region_end < region_base) {
+        break;
+      }
+
+      if (mbi.State == MEM_COMMIT &&
+          mbi.Type == MEM_PRIVATE &&
+          (mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS)) == 0 &&
+          IsReadableWritableProtection(mbi.Protect) &&
+          IsMemoryRangeNearAddress(
+              region_base,
+              region_end,
+              app_object,
+              kQuickbarWeaponDetailAppNearbyBytes) &&
+          region_end > region_base + sizeof(uint32_t)) {
+        ScanQuickbarWeaponDetailRegion(region_base, region_end, results, result_count, true);
+      }
+
+      cursor = region_end;
+    }
+  }
+
+  for (int result_index = 0; result_index < result_count; ++result_index) {
+    if (results[result_index].found != 0) {
+      StoreQuickbarWeaponDetailCacheScanResult(results[result_index]);
+    }
+  }
+
+  for (int entry_index = 0; entry_index < count; ++entry_index) {
+    QuickbarWeaponInfoEntry* entry = &entries[entry_index];
+    const int primary_index = FindQuickbarWeaponDetailResult(results, result_count, entry->primary_item_id);
+    if (primary_index >= 0 && results[primary_index].found != 0) {
+      ApplyQuickbarWeaponDetailRows(entry, 1, results[primary_index]);
+    }
+
+    const int secondary_index = FindQuickbarWeaponDetailResult(results, result_count, entry->secondary_item_id);
+    if (secondary_index >= 0 && results[secondary_index].found != 0) {
+      ApplyQuickbarWeaponDetailRows(entry, 2, results[secondary_index]);
+    }
+  }
+}
+
+void StoreQuickbarWeaponInfo(const QuickbarWeaponInfoEntry* entries, int count, DWORD last_error) {
+  if (entries == nullptr) {
+    count = 0;
+  }
+  if (count < 0) {
+    count = 0;
+  }
+  if (count > kQuickbarWeaponEntryCount) {
+    count = kQuickbarWeaponEntryCount;
+  }
+
+  if (g_state.lock_ready) {
+    EnterCriticalSection(&g_state.lock);
+  }
+  if (entries != nullptr && count > 0) {
+    memcpy(g_state.quickbar_weapons, entries, static_cast<size_t>(count) * sizeof(QuickbarWeaponInfoEntry));
+  }
+  if (count < kQuickbarWeaponEntryCount) {
+    ZeroMemory(
+        g_state.quickbar_weapons + count,
+        static_cast<size_t>(kQuickbarWeaponEntryCount - count) * sizeof(QuickbarWeaponInfoEntry));
+  }
+  InterlockedExchange(&g_state.quickbar_weapon_count, count);
+  InterlockedExchange(&g_state.quickbar_weapon_error, static_cast<LONG>(last_error));
+  if (g_state.lock_ready) {
+    LeaveCriticalSection(&g_state.lock);
+  }
+}
+
+void CopyStoredQuickbarWeaponInfo(QuickbarWeaponInfoResponse* response) {
+  if (response == nullptr) {
+    return;
+  }
+
+  ZeroMemory(response, sizeof(*response));
+  if (g_state.lock_ready) {
+    EnterCriticalSection(&g_state.lock);
+  }
+  LONG count = InterlockedCompareExchange(&g_state.quickbar_weapon_count, 0, 0);
+  if (count < 0) {
+    count = 0;
+  }
+  if (count > kQuickbarWeaponEntryCount) {
+    count = kQuickbarWeaponEntryCount;
+  }
+  response->count = count;
+  response->last_error = InterlockedCompareExchange(&g_state.quickbar_weapon_error, 0, 0);
+  response->success = response->last_error == ERROR_SUCCESS ? 1 : 0;
+  if (count > 0) {
+    memcpy(response->entries, g_state.quickbar_weapons, static_cast<size_t>(count) * sizeof(QuickbarWeaponInfoEntry));
+  }
+  if (g_state.lock_ready) {
+    LeaveCriticalSection(&g_state.lock);
+  }
+}
+
+void UpdateQuickbarWeaponInfoOnWindowThread() {
+  typedef void* (__thiscall* ResolveObjectByIdFn)(void* app_object, uint32_t object_id);
+
+  QuickbarWeaponInfoEntry* entries = g_state.quickbar_weapon_work;
+  ZeroMemory(g_state.quickbar_weapon_work, sizeof(g_state.quickbar_weapon_work));
+  for (int page = 0; page < kQuickbarPageCount; ++page) {
+    for (int slot = 0; slot < kQuickbarSlotCount; ++slot) {
+      InitializeQuickbarWeaponInfoEntry(
+          &entries[page * kQuickbarSlotCount + slot],
+          page,
+          slot);
+    }
+  }
+
+  DWORD last_error = ERROR_SUCCESS;
+  __try {
+    const uint32_t panel = static_cast<uint32_t>(InterlockedCompareExchange(&g_state.quickbar_this, 0, 0));
+    if (panel == 0 || SafeReadPointer32(panel) != RebaseAddress(kExpectedQuickbarVtable)) {
+      StoreQuickbarWeaponInfo(entries, kQuickbarWeaponEntryCount, ERROR_NOT_FOUND);
+      return;
+    }
+
+    const uint32_t app_object = ReadAppObjectPointer();
+    const uint32_t current_player_object_id = ReadCurrentPlayerObjectId();
+    if (app_object == 0 || current_player_object_id == 0) {
+      StoreQuickbarWeaponInfo(entries, kQuickbarWeaponEntryCount, ERROR_NOT_FOUND);
+      return;
+    }
+
+    const ResolveObjectByIdFn resolve_object =
+        reinterpret_cast<ResolveObjectByIdFn>(RebaseAddress(kExpectedObjectByIdResolver));
+    void* item_equipped_owner_fn = reinterpret_cast<void*>(RebaseAddress(kExpectedItemEquippedOwnerResolver));
+    const uint32_t detail_slot_mask_low =
+        static_cast<uint32_t>(InterlockedCompareExchange(&g_state.quickbar_weapon_detail_slot_mask_low, 0, 0));
+    const uint32_t detail_slot_mask_high =
+        static_cast<uint32_t>(InterlockedCompareExchange(&g_state.quickbar_weapon_detail_slot_mask_high, 0, 0));
+
+    for (int page = 0; page < kQuickbarPageCount; ++page) {
+      for (int slot = 0; slot < kQuickbarSlotCount; ++slot) {
+        QuickbarWeaponInfoEntry* entry = &entries[page * kQuickbarSlotCount + slot];
+        const bool request_detail = IsQuickbarWeaponDetailSlotRequested(
+            entry->bit_index,
+            detail_slot_mask_low,
+            detail_slot_mask_high);
+        const uint32_t slot_ptr = panel +
+            kQuickbarPanelSlotsOffset +
+            static_cast<uint32_t>(page) * kQuickbarPageStride +
+            static_cast<uint32_t>(slot) * kQuickbarSlotStride;
+        entry->slot_ptr = slot_ptr;
+
+        BYTE slot_type = 0;
+        if (!SafeReadValue(static_cast<uintptr_t>(slot_ptr) + kQuickbarSlotTypeOffset, &slot_type)) {
+          entry->slot_type = -1;
+          SetQuickbarWeaponEntryError(entry, ERROR_INVALID_DATA);
+          continue;
+        }
+        entry->slot_type = static_cast<int32_t>(slot_type);
+        if (slot_type != kQuickbarItemSlotType) {
+          continue;
+        }
+
+        const uint32_t primary_item_id =
+            SafeReadPointer32(static_cast<uintptr_t>(slot_ptr) + kQuickbarSlotPrimaryItemOffset);
+        const uint32_t secondary_item_id =
+            SafeReadPointer32(static_cast<uintptr_t>(slot_ptr) + kQuickbarSlotSecondaryItemOffset);
+        entry->primary_item_id = primary_item_id;
+        entry->secondary_item_id = secondary_item_id;
+
+        if (IsValidObjectId(primary_item_id)) {
+          void* primary_item = resolve_object(reinterpret_cast<void*>(app_object), primary_item_id);
+          entry->primary_item_ptr = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(primary_item));
+          entry->primary_equipped = ResolveQuickbarWeaponEquippedState(
+              primary_item,
+              item_equipped_owner_fn,
+              current_player_object_id);
+          if (primary_item != nullptr) {
+            ScanQuickbarWeaponItemProperties(entry->primary_item_ptr, 1, entry);
+          } else {
+            SetQuickbarWeaponEntryError(entry, ERROR_NOT_FOUND);
+          }
+          ScanQuickbarWeaponItemDescription(primary_item_id, 1, entry);
+          ApplyQuickbarWeaponDetailCacheRows(primary_item_id, 1, entry);
+          if (request_detail) {
+            RequestQuickbarWeaponItemDetailOnWindowThread(primary_item_id, 1, entry);
+          }
+        }
+
+        if (IsValidObjectId(secondary_item_id)) {
+          void* secondary_item = resolve_object(reinterpret_cast<void*>(app_object), secondary_item_id);
+          entry->secondary_item_ptr = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(secondary_item));
+          entry->secondary_equipped = ResolveQuickbarWeaponEquippedState(
+              secondary_item,
+              item_equipped_owner_fn,
+              current_player_object_id);
+          if (secondary_item != nullptr) {
+            ScanQuickbarWeaponItemProperties(entry->secondary_item_ptr, 2, entry);
+          } else {
+            SetQuickbarWeaponEntryError(entry, ERROR_NOT_FOUND);
+          }
+          ScanQuickbarWeaponItemDescription(secondary_item_id, 2, entry);
+          ApplyQuickbarWeaponDetailCacheRows(secondary_item_id, 2, entry);
+          if (request_detail) {
+            RequestQuickbarWeaponItemDetailOnWindowThread(secondary_item_id, 2, entry);
+          }
+        }
+      }
+    }
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    last_error = GetExceptionCode();
+    LogMessage(
+        kLogError,
+        "quickbar weapon info refresh raised exception code=0x%08lX",
+        static_cast<unsigned long>(last_error));
+  }
+
+  StoreQuickbarWeaponInfo(entries, kQuickbarWeaponEntryCount, last_error);
+  LogMessage(kLogDebug, "quickbar weapon info refreshed err=%lu", static_cast<unsigned long>(last_error));
 }
 
 void CopyStoredCharacterName(char* out, size_t capacity) {
@@ -1384,6 +3196,107 @@ extern "C" __declspec(naked) void ChatWindowLogTraceThunk() {
     jmp  eax
   }
 }
+
+extern "C" __declspec(naked) void ItemInfoParserEntryHook() {
+  __asm {
+    push dword ptr [esp + 8]
+    push dword ptr [esp + 8]
+    push ecx
+    call TryQuietItemInfoParser
+    add  esp, 12
+    cmp  eax, 080000000h
+    jne  handled
+    mov  eax, dword ptr [g_item_info_parser_gateway]
+    jmp  eax
+
+handled:
+    retn 8
+  }
+}
+
+extern "C" __declspec(naked) void ItemInfoPopupBranchHook() {
+  __asm {
+    pushad
+    call HasPendingQuickbarWeaponDetailRequests
+    test eax, eax
+    popad
+    jnz capture_quiet
+
+    push 0
+    push 0
+    mov  ecx, esi
+    mov  eax, dword ptr [g_item_info_parser_address]
+    call eax
+    mov  eax, dword ptr [g_item_info_popup_return_address]
+    jmp  eax
+
+capture_quiet:
+    push 0
+    mov  eax, esp
+    push eax
+    push 1
+    mov  ecx, esi
+    mov  eax, dword ptr [g_item_info_parser_address]
+    call eax
+    mov  edx, [esp]
+    add  esp, 4
+    push eax
+    push eax
+    push edx
+    call CaptureQuietItemDetailResult
+    add  esp, 8
+    pop  eax
+    mov  eax, dword ptr [g_item_info_popup_return_address]
+    jmp  eax
+  }
+}
+
+extern "C" __declspec(naked) void ItemInfoPropertyRowAppendHook() {
+  __asm {
+    pushfd
+    pushad
+    mov  edi, ecx
+    mov  esi, dword ptr [esp + 36 + 4]
+    mov  ebp, dword ptr [esp + 36 + 8]
+    mov  ebx, dword ptr [esp + 36 + 12]
+    mov  edx, dword ptr [esp + 36 + 16]
+    mov  eax, dword ptr [esp + 36 + 20]
+    push eax
+    push edx
+    push ebx
+    push ebp
+    push esi
+    push edi
+    call CaptureItemInfoPropertyRow
+    add  esp, 24
+    popad
+    popfd
+    mov  eax, dword ptr [g_item_info_property_row_gateway]
+    jmp  eax
+  }
+}
+
+extern "C" __declspec(naked) void ItemInfoMessageHandlerCallHook() {
+  __asm {
+    mov  eax, dword ptr [esp]
+    mov  dword ptr [g_item_info_message_handler_return_address], eax
+    mov  dword ptr [esp], offset ItemInfoMessageHandlerAfterOriginal
+    mov  eax, dword ptr [g_item_info_message_handler_gateway]
+    jmp  eax
+  }
+}
+
+extern "C" __declspec(naked) void ItemInfoMessageHandlerAfterOriginal() {
+  __asm {
+    pushfd
+    pushad
+    call HideQuietItemInfoPanelIfPending
+    popad
+    popfd
+    mov  eax, dword ptr [g_item_info_message_handler_return_address]
+    jmp  eax
+  }
+}
 #endif
 
 BOOL InstallQuickbarTraceHook() {
@@ -1481,6 +3394,227 @@ BOOL InstallChatWindowLogHook() {
       static_cast<unsigned int>(stolen),
       static_cast<unsigned int>(reinterpret_cast<uintptr_t>(g_chat_log_gateway)));
   return TRUE;
+}
+
+BOOL InstallItemInfoParserHook() {
+  if (InterlockedCompareExchange(&g_state.item_info_parser_hook_installed, 0, 0) != 0) {
+    return TRUE;
+  }
+
+  BYTE* target = reinterpret_cast<BYTE*>(RebaseAddress(kExpectedItemInfoParser));
+  const size_t stolen = 9;
+  BYTE original[16] = {};
+  memcpy(original, target, stolen);
+  if (original[0] != 0x83 || original[1] != 0xEC || original[2] != 0x40 ||
+      original[3] != 0x53 || original[4] != 0x55 || original[5] != 0x56 ||
+      original[6] != 0x8B || original[7] != 0xE9 || original[8] != 0x57) {
+    SetLastError(ERROR_INVALID_DATA);
+    return FALSE;
+  }
+
+  memcpy(g_item_info_parser_original, original, stolen);
+  g_item_info_parser_gateway = MakeJmpGateway(target, stolen);
+  if (g_item_info_parser_gateway == nullptr) {
+    SetLastError(ERROR_OUTOFMEMORY);
+    return FALSE;
+  }
+
+  BYTE patch[16] = {};
+  patch[0] = 0xE9;
+  *reinterpret_cast<int32_t*>(patch + 1) = static_cast<int32_t>(
+      reinterpret_cast<BYTE*>(&ItemInfoParserEntryHook) - (target + 5));
+  for (size_t index = 5; index < stolen; ++index) {
+    patch[index] = 0x90;
+  }
+  WriteExecutableMemory(target, patch, stolen);
+  g_item_info_parser_stolen = stolen;
+  InterlockedExchange(&g_state.item_info_parser_hook_installed, 1);
+  LogMessage(
+      kLogInfo,
+      "installed item info parser quiet hook at 0x%08X stolen=%u gateway=0x%08X",
+      RebaseAddress(kExpectedItemInfoParser),
+      static_cast<unsigned int>(stolen),
+      static_cast<unsigned int>(reinterpret_cast<uintptr_t>(g_item_info_parser_gateway)));
+  return TRUE;
+}
+
+BOOL InstallItemInfoPopupHook() {
+  if (g_item_info_popup_stolen != 0) {
+    return TRUE;
+  }
+
+  BYTE* target = reinterpret_cast<BYTE*>(RebaseAddress(kExpectedItemInfoPopupBranch));
+  const size_t stolen = 11;
+  BYTE original[16] = {};
+  memcpy(original, target, stolen);
+  if (original[0] != 0x6A || original[1] != 0x00 ||
+      original[2] != 0x6A || original[3] != 0x00 ||
+      original[4] != 0x8B || original[5] != 0xCE ||
+      original[6] != 0xE8) {
+    SetLastError(ERROR_INVALID_DATA);
+    return FALSE;
+  }
+
+  const int32_t call_rel = *reinterpret_cast<int32_t*>(original + 7);
+  const BYTE* call_target = target + stolen + call_rel;
+  if (reinterpret_cast<uint32_t>(call_target) != RebaseAddress(kExpectedItemInfoParser)) {
+    SetLastError(ERROR_INVALID_DATA);
+    return FALSE;
+  }
+
+  memcpy(g_item_info_popup_original, original, stolen);
+  g_item_info_parser_address = RebaseAddress(kExpectedItemInfoParser);
+  g_item_info_popup_return_address = RebaseAddress(kExpectedItemInfoPopupBranchReturn);
+
+  BYTE patch[16] = {};
+  patch[0] = 0xE9;
+  *reinterpret_cast<int32_t*>(patch + 1) = static_cast<int32_t>(
+      reinterpret_cast<BYTE*>(&ItemInfoPopupBranchHook) - (target + 5));
+  for (size_t index = 5; index < stolen; ++index) {
+    patch[index] = 0x90;
+  }
+  WriteExecutableMemory(target, patch, stolen);
+  g_item_info_popup_stolen = stolen;
+  LogMessage(
+      kLogInfo,
+      "installed item info quiet detail hook at 0x%08X stolen=%u return=0x%08X",
+      static_cast<unsigned int>(reinterpret_cast<uintptr_t>(target)),
+      static_cast<unsigned int>(stolen),
+      static_cast<unsigned int>(g_item_info_popup_return_address));
+  return TRUE;
+}
+
+BOOL InstallItemInfoPropertyRowHook() {
+  if (g_item_info_property_row_stolen != 0) {
+    return TRUE;
+  }
+
+  BYTE* target = reinterpret_cast<BYTE*>(RebaseAddress(kExpectedItemInfoPropertyRowCall));
+  const size_t stolen = 5;
+  BYTE original[16] = {};
+  memcpy(original, target, stolen);
+  if (original[0] != 0xE8) {
+    SetLastError(ERROR_INVALID_DATA);
+    return FALSE;
+  }
+
+  const int32_t call_rel = *reinterpret_cast<int32_t*>(original + 1);
+  const BYTE* call_target = target + stolen + call_rel;
+  if (reinterpret_cast<uint32_t>(call_target) != RebaseAddress(kExpectedItemInfoPropertyRowAppend)) {
+    SetLastError(ERROR_INVALID_DATA);
+    return FALSE;
+  }
+
+  memcpy(g_item_info_property_row_original, original, stolen);
+  g_item_info_property_row_gateway =
+      reinterpret_cast<void*>(RebaseAddress(kExpectedItemInfoPropertyRowAppend));
+
+  BYTE patch[5] = {};
+  patch[0] = 0xE8;
+  *reinterpret_cast<int32_t*>(patch + 1) = static_cast<int32_t>(
+      reinterpret_cast<BYTE*>(&ItemInfoPropertyRowAppendHook) - (target + 5));
+  WriteExecutableMemory(target, patch, stolen);
+  g_item_info_property_row_stolen = stolen;
+  LogMessage(
+      kLogInfo,
+      "installed item info property row call hook at 0x%08X stolen=%u target=0x%08X",
+      RebaseAddress(kExpectedItemInfoPropertyRowCall),
+      static_cast<unsigned int>(stolen),
+      static_cast<unsigned int>(reinterpret_cast<uintptr_t>(g_item_info_property_row_gateway)));
+  return TRUE;
+}
+
+BOOL UninstallItemInfoPropertyRowHook() {
+  if (g_item_info_property_row_stolen == 0) {
+    return TRUE;
+  }
+
+  BYTE* target = reinterpret_cast<BYTE*>(RebaseAddress(kExpectedItemInfoPropertyRowCall));
+  WriteExecutableMemory(target, g_item_info_property_row_original, g_item_info_property_row_stolen);
+  LogMessage(
+      kLogInfo,
+      "uninstalled item info property row call hook at 0x%08X restored=%u",
+      RebaseAddress(kExpectedItemInfoPropertyRowCall),
+      static_cast<unsigned int>(g_item_info_property_row_stolen));
+  g_item_info_property_row_stolen = 0;
+  return TRUE;
+}
+
+BOOL InstallItemInfoMessageHandlerHook() {
+  if (g_item_info_message_handler_stolen != 0) {
+    return TRUE;
+  }
+
+  BYTE* target = reinterpret_cast<BYTE*>(RebaseAddress(kExpectedItemInfoMessageHandlerCall));
+  const size_t stolen = 5;
+  BYTE original[8] = {};
+  memcpy(original, target, stolen);
+  if (original[0] != 0xE8) {
+    SetLastError(ERROR_INVALID_DATA);
+    return FALSE;
+  }
+
+  const int32_t call_rel = *reinterpret_cast<int32_t*>(original + 1);
+  const BYTE* call_target = target + stolen + call_rel;
+  if (reinterpret_cast<uint32_t>(call_target) != RebaseAddress(kExpectedItemInfoMessageHandler)) {
+    SetLastError(ERROR_INVALID_DATA);
+    return FALSE;
+  }
+
+  memcpy(g_item_info_message_handler_original, original, stolen);
+  g_item_info_message_handler_gateway =
+      reinterpret_cast<void*>(RebaseAddress(kExpectedItemInfoMessageHandler));
+
+  BYTE patch[5] = {};
+  patch[0] = 0xE8;
+  *reinterpret_cast<int32_t*>(patch + 1) = static_cast<int32_t>(
+      reinterpret_cast<BYTE*>(&ItemInfoMessageHandlerCallHook) - (target + 5));
+  WriteExecutableMemory(target, patch, stolen);
+  g_item_info_message_handler_stolen = stolen;
+  LogMessage(
+      kLogInfo,
+      "installed item info message handler call hook at 0x%08X stolen=%u target=0x%08X",
+      RebaseAddress(kExpectedItemInfoMessageHandlerCall),
+      static_cast<unsigned int>(stolen),
+      static_cast<unsigned int>(reinterpret_cast<uintptr_t>(g_item_info_message_handler_gateway)));
+  return TRUE;
+}
+
+BOOL UninstallItemInfoMessageHandlerHook() {
+  if (g_item_info_message_handler_stolen == 0) {
+    return TRUE;
+  }
+
+  BYTE* target = reinterpret_cast<BYTE*>(RebaseAddress(kExpectedItemInfoMessageHandlerCall));
+  WriteExecutableMemory(target, g_item_info_message_handler_original, g_item_info_message_handler_stolen);
+  LogMessage(
+      kLogInfo,
+      "uninstalled item info message handler call hook at 0x%08X restored=%u",
+      RebaseAddress(kExpectedItemInfoMessageHandlerCall),
+      static_cast<unsigned int>(g_item_info_message_handler_stolen));
+  g_item_info_message_handler_stolen = 0;
+  return TRUE;
+}
+
+BOOL EnsureQuickbarWeaponDetailHooksInstalled() {
+  if (!InstallItemInfoPropertyRowHook()) {
+    return FALSE;
+  }
+  if (!InstallItemInfoMessageHandlerHook()) {
+    const DWORD error = GetLastError();
+    UninstallItemInfoPropertyRowHook();
+    SetLastError(error);
+    return FALSE;
+  }
+  return TRUE;
+}
+
+void MaybeUninstallQuickbarWeaponDetailHooks() {
+  if (HasPendingQuickbarWeaponDetailRequests()) {
+    return;
+  }
+  UninstallItemInfoMessageHandlerHook();
+  UninstallItemInfoPropertyRowHook();
 }
 
 LRESULT CallQuickbarExecDirect(int slot_index) {
@@ -2585,6 +4719,8 @@ void BuildSnapshotText(const char* reason, char* out, size_t capacity) {
   const uint32_t runtime_quickbar_vtable = RebaseAddress(kExpectedQuickbarVtable);
   const uint32_t runtime_object_by_id_resolver = RebaseAddress(kExpectedObjectByIdResolver);
   const uint32_t runtime_item_equipped_owner_resolver = RebaseAddress(kExpectedItemEquippedOwnerResolver);
+  const uint32_t runtime_item_description_builder = RebaseAddress(kExpectedItemDescriptionBuilder);
+  const uint32_t runtime_nwn_string_init = RebaseAddress(kExpectedNwnStringInit);
   const uint32_t runtime_chat_send = RebaseAddress(kExpectedChatSend);
   const uint32_t runtime_chat_window_log = RebaseAddress(kExpectedChatWindowLog);
   const uint32_t runtime_app_object_resolver = RebaseAddress(kExpectedAppObjectResolver);
@@ -2706,6 +4842,22 @@ void BuildSnapshotText(const char* reason, char* out, size_t capacity) {
       quickbar_item_mask_low,
       quickbar_equipped_mask_high,
       quickbar_equipped_mask_low);
+  AppendFormat(out, capacity, &offset, "quickbarWeapon: itemDescription=0x%08X stringInit=0x%08X itemInfoParser=0x%08X parserHook=%ld itemInfoBranch=0x%08X branchHook=%u itemInfoPropertyRow=0x%08X itemInfoPropertyRowCall=0x%08X rowHook=%u itemInfoMessage=0x%08X itemInfoMessageCall=0x%08X messageHook=%u itemDetailRequest=0x%08X detailPending=%ld detailCacheHits=%ld\r\n",
+      runtime_item_description_builder,
+      runtime_nwn_string_init,
+      RebaseAddress(kExpectedItemInfoParser),
+      InterlockedCompareExchange(&g_state.item_info_parser_hook_installed, 0, 0),
+      RebaseAddress(kExpectedItemInfoPopupBranch),
+      static_cast<unsigned int>(g_item_info_popup_stolen != 0),
+      RebaseAddress(kExpectedItemInfoPropertyRowAppend),
+      RebaseAddress(kExpectedItemInfoPropertyRowCall),
+      static_cast<unsigned int>(g_item_info_property_row_stolen != 0),
+      RebaseAddress(kExpectedItemInfoMessageHandler),
+      RebaseAddress(kExpectedItemInfoMessageHandlerCall),
+      static_cast<unsigned int>(g_item_info_message_handler_stolen != 0),
+      RebaseAddress(kExpectedItemDetailRequest),
+      InterlockedCompareExchange(&g_state.quickbar_weapon_detail_pending_count, 0, 0),
+      InterlockedCompareExchange(&g_state.quickbar_weapon_detail_cache_hits, 0, 0));
   AppendFormat(out, capacity, &offset, "chat: send=0x%08X windowLog=0x%08X trace=%ld queued=%ld nextWrite=%ld latestSeq=%ld lastMode=%ld lastRc=%ld lastErr=%ld\r\n",
       runtime_chat_send,
       runtime_chat_window_log,
@@ -2716,6 +4868,13 @@ void BuildSnapshotText(const char* reason, char* out, size_t capacity) {
       InterlockedCompareExchange(&g_state.last_chat_mode, 0, 0),
       InterlockedCompareExchange(&g_state.last_chat_result, 0, 0),
       InterlockedCompareExchange(&g_state.last_chat_error, 0, 0));
+  AppendFormat(out, capacity, &offset, "keyboard: messages=%ld down=%ld up=%ld lastMsg=0x%04lX lastWParam=0x%08lX lastLParam=0x%08lX\r\n",
+      InterlockedCompareExchange(&g_state.key_message_count, 0, 0),
+      InterlockedCompareExchange(&g_state.key_down_count, 0, 0),
+      InterlockedCompareExchange(&g_state.key_up_count, 0, 0),
+      InterlockedCompareExchange(&g_state.last_key_message, 0, 0),
+      InterlockedCompareExchange(&g_state.last_key_wparam, 0, 0),
+      InterlockedCompareExchange(&g_state.last_key_lparam, 0, 0));
   AppendFormat(out, capacity, &offset, "overlay: hook=%ld count=%ld draws=%ld err=%ld\r\n",
       InterlockedCompareExchange(&g_state.overlay_hook_installed, 0, 0),
       InterlockedCompareExchange(&g_state.overlay_count, 0, 0),
@@ -3199,6 +5358,9 @@ BOOL ResolveCurrentCharacterIdentityOnWindowThread(DWORD* out_error) {
   InterlockedExchange(&g_state.identity_error, static_cast<LONG>(last_error));
   InterlockedIncrement(&g_state.identity_refresh_count);
   UpdateQuickbarItemMasksOnWindowThread();
+  if (InterlockedExchange(&g_state.quickbar_weapon_refresh_requested, 0) != 0) {
+    UpdateQuickbarWeaponInfoOnWindowThread();
+  }
 
   if (last_error == ERROR_SUCCESS) {
     LogMessage(
@@ -3587,6 +5749,19 @@ BOOL FindGameWindow(HWND* out_hwnd, DWORD* out_thread_id) {
 }
 
 LRESULT CALLBACK SimKeysWndProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
+  if (message == WM_KEYDOWN || message == WM_KEYUP ||
+      message == WM_SYSKEYDOWN || message == WM_SYSKEYUP) {
+    InterlockedIncrement(&g_state.key_message_count);
+    if (message == WM_KEYDOWN || message == WM_SYSKEYDOWN) {
+      InterlockedIncrement(&g_state.key_down_count);
+    } else {
+      InterlockedIncrement(&g_state.key_up_count);
+    }
+    InterlockedExchange(&g_state.last_key_message, static_cast<LONG>(message));
+    InterlockedExchange(&g_state.last_key_wparam, static_cast<LONG>(wparam));
+    InterlockedExchange(&g_state.last_key_lparam, static_cast<LONG>(lparam));
+  }
+
   if (message == kMsgTriggerVk) {
     const LONG request_id = static_cast<LONG>(lparam);
     const UINT vk = static_cast<UINT>(wparam);
@@ -4891,6 +7066,27 @@ BOOL HandlePipeClient(HANDLE pipe) {
         break;
       }
 
+      case kOpQuickbarWeapons: {
+        EnsureHookInstalled();
+        if (InterlockedCompareExchange(&g_state.quickbar_this, 0, 0) == 0) {
+          DiscoverQuickbarPanelByScan("quickbar-weapons");
+        }
+        QuickbarWeaponInfoRequest request = {};
+        if (header.size >= sizeof(request)) {
+          memcpy(&request, payload, sizeof(request));
+        }
+        InterlockedExchange(&g_state.quickbar_weapon_detail_slot_mask_low, static_cast<LONG>(request.detail_slot_mask_low));
+        InterlockedExchange(&g_state.quickbar_weapon_detail_slot_mask_high, static_cast<LONG>(request.detail_slot_mask_high));
+        InterlockedExchange(&g_state.quickbar_weapon_refresh_requested, 1);
+        RefreshCharacterIdentity(nullptr);
+        QuickbarWeaponInfoResponse response = {};
+        CopyStoredQuickbarWeaponInfo(&response);
+        if (!WriteResponse(pipe, kOpQuickbarWeapons, &response, sizeof(response))) {
+          return FALSE;
+        }
+        break;
+      }
+
       case kOpSnapshotText: {
         if (InterlockedCompareExchange(&g_state.quickbar_this, 0, 0) == 0) {
           DiscoverQuickbarPanelByScan("snapshot");
@@ -5621,9 +7817,19 @@ SIMKEYS_API DWORD WINAPI InitSimKeys(LPVOID) {
     return 0;
   }
 
+  InitializeCriticalSection(&g_quickbar_weapon_detail_lock);
+  g_quickbar_weapon_detail_lock_ready = true;
+  ZeroMemory(g_quickbar_weapon_detail_cache, sizeof(g_quickbar_weapon_detail_cache));
+  InterlockedExchange(&g_state.quickbar_weapon_detail_slot_mask_low, 0);
+  InterlockedExchange(&g_state.quickbar_weapon_detail_slot_mask_high, 0);
+  InterlockedExchange(&g_state.quickbar_weapon_detail_pending_count, 0);
+  InterlockedExchange(&g_state.quickbar_weapon_detail_cache_hits, 0);
+
   InterlockedExchange(&g_state.log_level, kLogInfo);
   g_state.pipe_thread = CreateThread(nullptr, 0, PipeThreadMain, nullptr, 0, nullptr);
   if (g_state.pipe_thread == nullptr) {
+    g_quickbar_weapon_detail_lock_ready = false;
+    DeleteCriticalSection(&g_quickbar_weapon_detail_lock);
     CloseHandle(g_state.pipe_ready_event);
     g_state.pipe_ready_event = nullptr;
     CloseHandle(g_state.pending_map_pin.event);
