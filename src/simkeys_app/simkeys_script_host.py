@@ -698,6 +698,7 @@ def _area_pin_key(name: str) -> str:
     value = value.replace("\ufffd", "")
     value = re.sub(r"\s*-\s*", " - ", value)
     value = re.sub(r"\s+", " ", value.strip())
+    value = re.sub(r"\s+\((?:No|Party|Full)\s+PVP\)\s*$", "", value, flags=re.IGNORECASE)
     value = value.replace("'", "")
     return value.casefold()
 
@@ -10078,7 +10079,7 @@ class ScriptManager:
             factory=MapPinsScript,
             details=(
                 "Map Pins loads HGX area pin coordinates from `data\\areas.d` by default. When the client reports an "
-                "area transition, it adds every configured pin for that exact area name through the native HGCC hook."
+                "area transition, it adds every configured pin for the normalized area name through the native HGCC hook."
             ),
         )
         self.registry[map_pins.script_id] = map_pins

@@ -102,6 +102,7 @@ constexpr uint32_t kChatWindowLog = 0x080B89F0u;
 constexpr uint32_t kWalkToWaypoint = 0x08077260u;
 constexpr uint32_t kWalkNoWalkBlock = 0x0807E84Au;
 constexpr uint32_t kWalkNoWalkBypassTarget = 0x0807E878u;
+constexpr uint32_t kClientGuiMessageResolver = 0x08076838u;
 constexpr uint32_t kCurrentGuiResolver = 0x08077008u;
 constexpr uint32_t kCurrentClientPlayerResolver = 0x08076A9Cu;
 constexpr uint32_t kQuickbarItemResolver = 0x08076B4Cu;
@@ -1422,6 +1423,11 @@ uint32_t ReadCurrentGuiPointer() {
   return app_inner != 0 ? SafeReadPointer32(static_cast<uintptr_t>(app_inner) + 0x48u) : 0;
 }
 
+uint32_t ReadClientGuiMessagePointer() {
+  const uint32_t app_inner = ReadAppInnerPointer();
+  return app_inner != 0 ? SafeReadPointer32(static_cast<uintptr_t>(app_inner) + 0x44u) : 0;
+}
+
 uint32_t ReadCurrentPlayerGlobalPointer() {
   return SafeReadPointer32(kCurrentPlayerGlobalAddress);
 }
@@ -2208,24 +2214,42 @@ int32_t CallAddMapPinDirect(float x, float y, const char* text) {
     return 0;
   }
 
-  const uint32_t gui = ReadCurrentGuiPointer();
-  if (gui == 0) {
+  const uint32_t app_object = ReadAppObjectPointer();
+  if (app_object == 0) {
     errno = ENOENT;
     return 0;
   }
 
+  typedef uint32_t (*ResolveClientGuiMessageFn)(void* app_object);
   typedef NwnStringRef* (*ConstructStringFn)(NwnStringRef*, const char*);
   typedef void (*ClientMessageDispatchFn)(
-      void* gui,
+      void* target,
       NwnStringRef* message,
       int32_t opcode,
       int32_t arg0,
       int32_t arg1,
       ClientMessageExtra extra);
 
+  uint32_t target = 0;
   NwnStringRef message = {};
   ClientMessageExtra extra = {};
   int signal_number = 0;
+  if (!RunWithFaultGuard(
+          [&]() {
+            target = NwnFunction<ResolveClientGuiMessageFn>(kClientGuiMessageResolver)(
+                reinterpret_cast<void*>(app_object));
+          },
+          &signal_number)) {
+    errno = EFAULT;
+    LogMessage(kLogError, "map pin GUI message resolver faulted signal=%d app=0x%08X text=%s", signal_number, app_object, text);
+    return 0;
+  }
+  if (target == 0) {
+    errno = ENOENT;
+    return 0;
+  }
+
+  signal_number = 0;
   if (!RunWithFaultGuard(
           [&]() {
             NwnFunction<ConstructStringFn>(kNwnStringConstructFromCString)(&message, xml);
@@ -2244,7 +2268,7 @@ int32_t CallAddMapPinDirect(float x, float y, const char* text) {
   if (!RunWithFaultGuard(
           [&]() {
             NwnFunction<ClientMessageDispatchFn>(kChatWindowLog)(
-                reinterpret_cast<void*>(gui),
+                reinterpret_cast<void*>(target),
                 &message,
                 0x80,
                 0,
@@ -2255,9 +2279,9 @@ int32_t CallAddMapPinDirect(float x, float y, const char* text) {
     errno = EFAULT;
     LogMessage(
         kLogError,
-        "map pin dispatch faulted signal=%d gui=0x%08X x=%.3f y=%.3f text=%s",
+        "map pin dispatch faulted signal=%d target=0x%08X x=%.3f y=%.3f text=%s",
         signal_number,
-        gui,
+        target,
         static_cast<double>(x),
         static_cast<double>(y),
         text);
@@ -4100,8 +4124,8 @@ void FillSnapshotText(const char* reason, char* out, size_t capacity) {
       "hook: module=SimKeysHookLinux.so\n"
       "hook: log=%s\n"
       "hook: installed=%d logLevel=%d pipeState=%d pipeErr=%d\n"
-      "expected: quickbarExec=0x%08X quickbarPageSelect=0x%08X slotDispatch=0x%08X quickbarVtable=0x%08X chatSend=0x%08X chatWindowLog=0x%08X\n"
-      "engine: appGlobalSlot=0x%08X appHolder=0x%08X appObject=0x%08X serverApp=0x%08X appInner=0x%08X currentObjectId=0x%08X currentPlayerGlobal=0x%08X\n"
+      "expected: quickbarExec=0x%08X quickbarPageSelect=0x%08X slotDispatch=0x%08X quickbarVtable=0x%08X chatSend=0x%08X chatWindowLog=0x%08X clientGuiMessageResolver=0x%08X\n"
+      "engine: appGlobalSlot=0x%08X appHolder=0x%08X appObject=0x%08X serverApp=0x%08X appInner=0x%08X clientGuiMessage=0x%08X currentObjectId=0x%08X currentPlayerGlobal=0x%08X\n"
       "pending: busy=%d kind=%d done=%d drains=%d wakeAttempts=%d wakeSuccess=%d wakeSwallowed=%d signalAttempts=%d signalSuccess=%d focusLossSwallowed=%d\n"
       "quickbar: execTrace=%d slotTrace=%d capturedThis=0x%08X page=%d capturedSlot=%d slotPtr=0x%08X slotType=%d calls=%d scanAttempts=%d scanHits=%d itemMask=0x%08X%08X equippedMask=0x%08X%08X\n"
       "chat: trace=%d queued=%d nextWrite=%d latestSeq=%d lastMode=%d lastRc=%d lastErr=%d\n"
@@ -4125,11 +4149,13 @@ void FillSnapshotText(const char* reason, char* out, size_t capacity) {
       kQuickbarPanelVtable,
       kChatSend,
       kChatWindowLog,
+      kClientGuiMessageResolver,
       kAppGlobalSlotAddress,
       ReadAppHolderPointer(),
       ReadAppObjectPointer(),
       ReadServerAppObjectPointer(),
       ReadAppInnerPointer(),
+      ReadClientGuiMessagePointer(),
       ReadCurrentPlayerObjectId(),
       ReadCurrentPlayerGlobalPointer(),
       pending_busy,
